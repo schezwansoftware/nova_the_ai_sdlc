@@ -19,9 +19,10 @@ class LangGraphRunner:
     runtime adapter without changing Orchestrator or agent contracts.
     """
 
-    def __init__(self, orchestrator: Orchestrator, workflow: WorkflowState, nodes: Optional[List[Dict[str, Any]]] = None):
+    def __init__(self, orchestrator: Orchestrator, workflow: WorkflowState, nodes: Optional[List[Dict[str, Any]]] = None, inputs: Optional[Dict[str, Any]] = None):
         self.orch = orchestrator
         self.wf = workflow
+        self.inputs = inputs or {}
         # nodes is a list of dicts: {"id": "po", "type": "agent", "agent_id": "po"}
         if nodes is None:
             self.nodes = [{"id": "po", "type": "agent", "agent_id": "po"}]
@@ -48,7 +49,8 @@ class LangGraphRunner:
 
             if ntype == "agent":
                 agent_id = node.get("agent_id")
-                res = self.orch.invoke_agent_for_stage(self.wf, agent_id)
+                node_inputs = self.inputs if i == start_index else None
+                res = self.orch.invoke_agent_for_stage(self.wf, agent_id, inputs=node_inputs)
 
                 # handle responses from orchestrator.invoke_agent_for_stage
                 status = res.get("status")

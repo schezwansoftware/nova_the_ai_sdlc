@@ -34,16 +34,15 @@ class Orchestrator:
         self.store.append_audit_event(event)
 
     # LangGraph integration helpers
-    def run_workflow_graph(self, workflow_id: str) -> Dict[str, Any]:
+    def run_workflow_graph(self, workflow_id: str, inputs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         wf = self.load_workflow()
         if not wf or wf.workflow_id != workflow_id:
             raise RuntimeError("workflow not found")
-        # construct a simple linear graph for the initial vertical slice
         from ai_sdlc.orchestration.langgraph_runner import LangGraphRunner
         nodes = [
             {"id": "requirements", "type": "agent", "agent_id": "po"},
         ]
-        runner = LangGraphRunner(self, wf, nodes=nodes)
+        runner = LangGraphRunner(self, wf, nodes=nodes, inputs=inputs)
         return runner.run()
 
     def resume_workflow_after_clarification(self, workflow_id: str, question_id: str, answer: str) -> Dict[str, Any]:

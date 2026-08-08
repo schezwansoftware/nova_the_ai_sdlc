@@ -181,7 +181,10 @@ class OrchestratorAPI:
 
             # execute initial node via internal graph runner
             try:
-                res = self.orch.run_workflow_graph(wf.workflow_id)
+                res = self.orch.run_workflow_graph(
+                    wf.workflow_id,
+                    inputs={"requirement_text": req.raw_requirement, "project_context": req.project_context},
+                )
             except Exception as e:
                 if self._is_missing_agent_error(e):
                     return self._orchestration_error(
