@@ -2,8 +2,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Dict, Optional, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from pydantic import BaseModel, Field
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def utc_now_iso() -> str:
+    return utc_now().replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 class WorkflowStatus(str):
@@ -23,8 +31,8 @@ class WorkflowState(BaseModel):
     stages: Dict[str, str] = Field(default_factory=dict)
     pending_approval: Optional[Dict[str, Any]] = None
     retry_count: Dict[str, int] = Field(default_factory=dict)
-    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
-    updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
 
 
 class StateStore:
@@ -63,7 +71,7 @@ class StateStore:
         return WorkflowState(**data)
 
     def write_workflow(self, state: WorkflowState) -> None:
-        state.updated_at = datetime.utcnow().isoformat() + "Z"
+        state.updated_at = utc_now_iso()
         tmp = self.state_dir / f"workflow.json.tmp"
         # Use pydantic v2 model_dump_json to produce JSON string
         tmp.write_text(state.model_dump_json(indent=2), encoding="utf-8")
@@ -74,7 +82,7 @@ class StateStore:
 
         Event will receive a timestamp if not provided.
         """
-        event.setdefault("timestamp", datetime.utcnow().isoformat() + "Z")
+        event.setdefault("timestamp", utc_now_iso())
         line = json.dumps(event, ensure_ascii=False)
         # ensure file exists
         with self.audit_file.open("a", encoding="utf-8") as f:

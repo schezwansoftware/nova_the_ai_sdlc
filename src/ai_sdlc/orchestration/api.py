@@ -5,7 +5,7 @@ from enum import Enum
 from pydantic import BaseModel, Field, ValidationError
 
 from ai_sdlc.orchestration.orchestrator import Orchestrator
-from ai_sdlc.orchestration.state import WorkflowState
+from ai_sdlc.orchestration.state import WorkflowState, utc_now
 
 T = TypeVar("T")
 
@@ -48,7 +48,7 @@ class APIErrorDetail(BaseModel):
     code: ErrorCode
     message: str
     details: Optional[Dict[str, Any]] = None
-    timestamp: datetime = Field(default_factory=lambda: datetime.utcnow())
+    timestamp: datetime = Field(default_factory=utc_now)
 
 
 class APIResponse(BaseModel, Generic[T]):
@@ -156,11 +156,26 @@ class OrchestratorAPI:
         self.workspace = workspace
         self.orch = Orchestrator(workspace)
 
+    @staticmethod
+    def _is_missing_agent_error(error: Exception) -> bool:
+        return "agent not found" in str(error).lower()
+
+    @staticmethod
+    def _orchestration_error(message: str, details: Optional[Dict[str, Any]] = None) -> APIResponse:
+        return APIResponse(
+            success=False,
+            error=APIErrorDetail(
+                code=ErrorCode.INTERNAL_ORCHESTRATION_ERROR,
+                message=message,
+                details=details,
+            ),
+        )
+
     def start_workflow(self, req: StartWorkflowRequest) -> APIResponse[StartWorkflowData]:
         # Validate request via pydantic already done by caller
         try:
             # create workflow state
-            wf_id = f"wf-{req.initiator_id}-{int(datetime.utcnow().timestamp())}"
+            wf_id = f"wf-{req.initiator_id}-{int(utc_now().timestamp())}"
             wf = WorkflowState(workflow_id=wf_id, current_stage="requirements", initiator_id=req.initiator_id)
             self.orch.store.write_workflow(wf)
 
@@ -168,26 +183,19 @@ class OrchestratorAPI:
             try:
                 res = self.orch.run_workflow_graph(wf.workflow_id)
             except Exception as e:
-                # If agents are not registered yet in the workspace (common in tests),
-                # treat starting the workflow as successful and leave the workflow in RUNNING state.
-                if "Agent not found" in str(e) or isinstance(e, RuntimeError):
-                    data = StartWorkflowData(
-                        workflow_id=wf.workflow_id,
-                        initiator_id=wf.initiator_id,
-                        current_phase=WorkflowPhase.REQUIREMENTS,
-                        status=WorkflowStatusType.RUNNING,
-                        created_at=datetime.utcnow(),
+                if self._is_missing_agent_error(e):
+                    return self._orchestration_error(
+                        str(e),
+                        details={"reason": "missing_agent", "workflow_id": wf.workflow_id},
                     )
-                    return APIResponse(success=True, data=data)
-                else:
-                    raise
+                raise
 
             data = StartWorkflowData(
                 workflow_id=wf.workflow_id,
                 initiator_id=wf.initiator_id,
                 current_phase=WorkflowPhase.REQUIREMENTS,
                 status=WorkflowStatusType.RUNNING if res.get("status") != "completed" else WorkflowStatusType.COMPLETED,
-                created_at=datetime.utcnow(),
+                created_at=utc_now(),
             )
             return APIResponse(success=True, data=data)
         except ValidationError as e:
@@ -212,6 +220,8 @@ class OrchestratorAPI:
                 status = WorkflowStatusType.FAILED
             if wf.status == "completed":
                 status = WorkflowStatusType.COMPLETED
+            if wf.status == "cancelled":
+                status = WorkflowStatusType.CANCELLED
 
             pending = None
             if wf.status == "paused":
@@ -227,7 +237,7 @@ class OrchestratorAPI:
                 current_phase=phase,
                 status=status,
                 pending_action=pending,
-                updated_at=datetime.utcnow(),
+                updated_at=utc_now(),
                 artifacts=artifacts_map,
             )
             return APIResponse(success=True, data=data)
@@ -248,11 +258,8 @@ class OrchestratorAPI:
             try:
                 res = self.orch.resume_workflow_after_clarification(wf.workflow_id, question_id="unknown", answer=req.response_text)
             except Exception as e:
-                # If agents are not present or orchestrator cannot continue execution in tests,
-                # accept the clarification and return success; workflow will remain paused until agents are available.
-                if "Agent not found" in str(e) or isinstance(e, RuntimeError):
-                    data = SubmitClarificationData(workflow_id=wf.workflow_id, current_phase=WorkflowPhase.REQUIREMENTS, status=WorkflowStatusType.RUNNING)
-                    return APIResponse(success=True, data=data)
+                if self._is_missing_agent_error(e):
+                    return self._orchestration_error(str(e), details={"reason": "missing_agent", "workflow_id": wf.workflow_id})
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.INTERNAL_ORCHESTRATION_ERROR, message=str(e)))
 
             status = WorkflowStatusType.COMPLETED if res.get("status") == "completed" else WorkflowStatusType.RUNNING
@@ -277,10 +284,8 @@ class OrchestratorAPI:
             try:
                 res = self.orch.resume_workflow_after_approval(wf.workflow_id, approval_id="unknown", decision=decision)
             except Exception as e:
-                if "Agent not found" in str(e) or isinstance(e, RuntimeError):
-                    msg = "Approved (queued) and will resume when agents are available" if req.approved else "Rejected and returned for revision"
-                    data = SubmitApprovalData(workflow_id=wf.workflow_id, current_phase=WorkflowPhase.REQUIREMENTS, status=WorkflowStatusType.RUNNING, message=msg)
-                    return APIResponse(success=True, data=data)
+                if self._is_missing_agent_error(e):
+                    return self._orchestration_error(str(e), details={"reason": "missing_agent", "workflow_id": wf.workflow_id})
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.INTERNAL_ORCHESTRATION_ERROR, message=str(e)))
 
             status = WorkflowStatusType.COMPLETED if res.get("status") == "completed" else WorkflowStatusType.RUNNING
@@ -297,15 +302,14 @@ class OrchestratorAPI:
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.WORKFLOW_NOT_FOUND, message="Workflow not found"))
             if wf.initiator_id != req.initiator_id:
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.UNAUTHORIZED_INITIATOR, message="Initiator mismatch"))
-            if wf.status in ("completed", "failed"):
+            if wf.status in ("completed", "failed", "cancelled"):
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.INVALID_STATE_TRANSITION, message="Workflow is already terminal"))
 
             try:
                 res = self.orch.run_workflow_graph(wf.workflow_id)
             except Exception as e:
-                if "Agent not found" in str(e) or isinstance(e, RuntimeError):
-                    # No agents available to run; return success and keep workflow in current state
-                    return APIResponse(success=True, data=ResumeWorkflowData(workflow_id=wf.workflow_id, current_phase=WorkflowPhase.REQUIREMENTS, status=WorkflowStatusType.RUNNING))
+                if self._is_missing_agent_error(e):
+                    return self._orchestration_error(str(e), details={"reason": "missing_agent", "workflow_id": wf.workflow_id})
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.INTERNAL_ORCHESTRATION_ERROR, message=str(e)))
 
             status = WorkflowStatusType.COMPLETED if res.get("status") == "completed" else WorkflowStatusType.RUNNING
@@ -321,12 +325,12 @@ class OrchestratorAPI:
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.WORKFLOW_NOT_FOUND, message="Workflow not found"))
             if wf.initiator_id != req.initiator_id:
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.UNAUTHORIZED_INITIATOR, message="Initiator mismatch"))
-            if wf.status in ("completed", "failed"):
+            if wf.status in ("completed", "failed", "cancelled"):
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.INVALID_STATE_TRANSITION, message="Workflow is already terminal"))
 
             wf.status = "cancelled"
             self.orch.save_workflow(wf)
-            data = CancelWorkflowData(workflow_id=wf.workflow_id, cancelled_at=datetime.utcnow())
+            data = CancelWorkflowData(workflow_id=wf.workflow_id, cancelled_at=utc_now())
             return APIResponse(success=True, data=data)
         except Exception as e:
             return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.INTERNAL_ORCHESTRATION_ERROR, message=str(e)))
