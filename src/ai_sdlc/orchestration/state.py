@@ -1,9 +1,25 @@
 from __future__ import annotations
+import contextlib
 import json
+import os
+import tempfile
+import threading
 from pathlib import Path
 from typing import Dict, Optional, Any
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None
 from datetime import datetime, timezone
 from pydantic import BaseModel, Field
+
+DEFAULT_LOCK_TIMEOUT = 5.0
+
+
+class WorkflowLockTimeoutError(Exception):
+    """Raised when a compound read-modify-write transaction cannot acquire
+    the in-process workflow lock within the timeout."""
 
 
 def utc_now() -> datetime:
@@ -15,10 +31,20 @@ def utc_now_iso() -> str:
 
 
 class WorkflowStatus(str):
+    """Centralized internal workflow status vocabulary.
+
+    Values are the authoritative on-disk string representations; do not
+    change them without a migration, since they are persisted in
+    .ai-sdlc/workflows/{workflow_id}.json.
+    """
+
     RUNNING = "running"
+    WAITING_FOR_CLARIFICATION = "paused"
     WAITING_FOR_APPROVAL = "waiting_for_approval"
+    REVISION_REQUIRED = "revision_required"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class WorkflowState(BaseModel):
@@ -27,8 +53,10 @@ class WorkflowState(BaseModel):
     status: str = WorkflowStatus.RUNNING
     current_stage: Optional[str] = None
     initiator_id: Optional[str] = None
-    repository: Dict[str, str] = {}
+    repository: Dict[str, str] = Field(default_factory=dict)
     stages: Dict[str, str] = Field(default_factory=dict)
+    inputs: Dict[str, Any] = Field(default_factory=dict)
+    pending_clarification: Optional[Dict[str, Any]] = None
     pending_approval: Optional[Dict[str, Any]] = None
     retry_count: Dict[str, int] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utc_now_iso)
@@ -36,27 +64,38 @@ class WorkflowState(BaseModel):
 
 
 class StateStore:
-    """Simple file-backed state store for .ai-sdlc/workflow.json
+    """Simple file-backed state engine for .ai-sdlc workflow persistence.
 
-    Atomic writes are implemented by writing to a temporary file then renaming.
-    This class validates the JSON structure with the WorkflowState pydantic model.
-    It also provides helpers for audit events, approvals and clarifications used
-    by the Orchestrator.
+    This class validates JSON state using the WorkflowState model and
+    protects workflow persistence with file locks plus atomic temporary writes.
+
+    The fcntl-based `_locked()` lock below only protects each individual file
+    operation (a single read or a single write) from corruption. It does NOT
+    make a compound "load -> mutate -> save" sequence atomic — two such
+    sequences can still interleave and silently lose one side's update. Code
+    performing a compound read-modify-write against the workflow must hold
+    `transaction()` for the full sequence.
     """
 
     def __init__(self, workspace: Path | str):
-        # Accept either a Path or a string workspace path
         self.workspace = Path(workspace)
         self.state_dir = self.workspace / ".ai-sdlc"
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        self.workflow_path = self.state_dir / "workflow.json"
+        # Each workflow gets its own file, keyed by workflow_id, so the
+        # REST API's per-id addressing (/v1/workflows/{id}) doesn't clobber
+        # other in-flight workflows in the same workspace. `current_pointer_path`
+        # tracks the most-recently-written workflow_id purely so that legacy
+        # no-id callers (read_workflow()/write_workflow() with no id) keep
+        # working for the common single-workflow-per-workspace case.
+        self.workflows_dir = self.state_dir / "workflows"
+        self.workflows_dir.mkdir(parents=True, exist_ok=True)
+        self.current_pointer_path = self.state_dir / "current_workflow.json"
+        self.lock_path = self.state_dir / "workflow.lock"
 
-        # audit/events.jsonl
         self.audit_path = self.state_dir / "audit"
         self.audit_path.mkdir(parents=True, exist_ok=True)
         self.audit_file = self.audit_path / "events.jsonl"
 
-        # approvals, changes, clarifications directories
         self.approvals_dir = self.state_dir / "approvals"
         self.approvals_dir.mkdir(parents=True, exist_ok=True)
         self.changes_dir = self.state_dir / "changes"
@@ -64,41 +103,118 @@ class StateStore:
         self.clarifications_dir = self.state_dir / "clarifications"
         self.clarifications_dir.mkdir(parents=True, exist_ok=True)
 
-    def read_workflow(self) -> Optional[WorkflowState]:
-        if not self.workflow_path.exists():
+        # In-process mutex guarding compound read-modify-write sequences.
+        # This is scoped to this StateStore instance, which is sufficient
+        # because the platform HTTP server (ThreadedHTTPServer) runs a
+        # single process with one shared CorePlatform/StateStore instance
+        # across all request threads.
+        self._mutex = threading.Lock()
+
+    @contextlib.contextmanager
+    def transaction(self, timeout: float = DEFAULT_LOCK_TIMEOUT):
+        """Serialize a compound read-modify-write sequence against the
+        workflow (load_workflow() -> mutate -> save_workflow()) so concurrent
+        callers can't interleave and lose each other's updates.
+
+        Raises WorkflowLockTimeoutError if the lock isn't acquired within
+        `timeout` seconds, instead of blocking forever.
+        """
+        acquired = self._mutex.acquire(timeout=timeout)
+        if not acquired:
+            raise WorkflowLockTimeoutError(f"Could not acquire workflow lock within {timeout}s")
+        try:
+            yield
+        finally:
+            self._mutex.release()
+
+    @contextlib.contextmanager
+    def _locked(self, exclusive: bool = True):
+        lock_fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            if fcntl is not None:
+                flock_flag = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+                fcntl.flock(lock_fd, flock_flag)
+            try:
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+
+    def _atomic_write_text(self, path: Path, content: str) -> None:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.state_dir, delete=False) as handle:
+            handle.write(content)
+            temp_path = Path(handle.name)
+        os.replace(temp_path, path)
+
+    def _atomic_write_json(self, path: Path, payload: Dict[str, Any]) -> None:
+        self._atomic_write_text(path, json.dumps(payload, indent=2))
+
+    def _workflow_path(self, workflow_id: str) -> Path:
+        return self.workflows_dir / f"{workflow_id}.json"
+
+    def _read_current_pointer(self) -> Optional[str]:
+        if not self.current_pointer_path.exists():
             return None
-        data = json.loads(self.workflow_path.read_text(encoding="utf-8"))
+        try:
+            return json.loads(self.current_pointer_path.read_text(encoding="utf-8")).get("workflow_id")
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    def read_workflow(self, workflow_id: Optional[str] = None) -> Optional[WorkflowState]:
+        with self._locked(exclusive=False):
+            if workflow_id is None:
+                workflow_id = self._read_current_pointer()
+                if workflow_id is None:
+                    return None
+            path = self._workflow_path(workflow_id)
+            if not path.exists():
+                return None
+            data = json.loads(path.read_text(encoding="utf-8"))
         return WorkflowState(**data)
 
     def write_workflow(self, state: WorkflowState) -> None:
         state.updated_at = utc_now_iso()
-        tmp = self.state_dir / f"workflow.json.tmp"
-        # Use pydantic v2 model_dump_json to produce JSON string
-        tmp.write_text(state.model_dump_json(indent=2), encoding="utf-8")
-        tmp.rename(self.workflow_path)
+        with self._locked(exclusive=True):
+            self._atomic_write_text(self._workflow_path(state.workflow_id), state.model_dump_json(indent=2))
+            self._atomic_write_text(self.current_pointer_path, json.dumps({"workflow_id": state.workflow_id}))
 
     def append_audit_event(self, event: Dict) -> None:
-        """Append an audit event to .ai-sdlc/audit/events.jsonl (append-only).
-
-        Event will receive a timestamp if not provided.
-        """
         event.setdefault("timestamp", utc_now_iso())
         line = json.dumps(event, ensure_ascii=False)
-        # ensure file exists
-        with self.audit_file.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
+        with self._locked(exclusive=True):
+            with self.audit_file.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
 
     def write_approval(self, approval_id: str, approval_record: Dict) -> Path:
         path = self.approvals_dir / f"{approval_id}.json"
-        path.write_text(json.dumps(approval_record, indent=2), encoding="utf-8")
+        with self._locked(exclusive=True):
+            self._atomic_write_json(path, approval_record)
         return path
+
+    def read_approval(self, approval_id: str) -> Optional[Dict]:
+        path = self.approvals_dir / f"{approval_id}.json"
+        with self._locked(exclusive=False):
+            if not path.exists():
+                return None
+            return json.loads(path.read_text(encoding="utf-8"))
 
     def write_change_request(self, cr_id: str, cr_record: Dict) -> Path:
         path = self.changes_dir / f"{cr_id}.json"
-        path.write_text(json.dumps(cr_record, indent=2), encoding="utf-8")
+        with self._locked(exclusive=True):
+            self._atomic_write_json(path, cr_record)
         return path
 
     def write_clarification(self, question_id: str, question_record: Dict) -> Path:
         path = self.clarifications_dir / f"{question_id}.json"
-        path.write_text(json.dumps(question_record, indent=2), encoding="utf-8")
+        with self._locked(exclusive=True):
+            self._atomic_write_json(path, question_record)
         return path
+
+    def read_clarification(self, question_id: str) -> Optional[Dict]:
+        path = self.clarifications_dir / f"{question_id}.json"
+        with self._locked(exclusive=False):
+            if not path.exists():
+                return None
+            return json.loads(path.read_text(encoding="utf-8"))
