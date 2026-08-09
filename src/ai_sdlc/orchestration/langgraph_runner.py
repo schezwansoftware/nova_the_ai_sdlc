@@ -67,37 +67,8 @@ class LangGraphRunner:
 
                 # handle failures that may be retryable
                 if status == "failed":
-                    retryable = res.get("retryable", False)
-                    # if retryable and attempts remain, try again up to orchestrator.max_attempts
-                    attempts = self.wf.retry_count.get(agent_id, 0)
-                    max_attempts = self.orch.max_attempts
-                    if retryable and attempts < max_attempts:
-                        # attempt a retry loop until success or exhaustion
-                        while attempts < max_attempts:
-                            attempts += 1
-                            # invoke again
-                            res2 = self.orch.invoke_agent_for_stage(self.wf, agent_id)
-                            if res2.get("status") == "completed":
-                                # succeeded — continue to next node
-                                break
-                            if res2.get("status") == "failed":
-                                if not res2.get("retryable", False):
-                                    return {"status": "failed", "details": res2}
-                                # else continue loop; attempts will have been incremented inside orchestrator
-                                attempts = self.wf.retry_count.get(agent_id, attempts)
-                                continue
-                            # other statuses (clarification/approval) — return upstream
-                            if res2.get("status") == "needs_clarification":
-                                return {"status": "interrupted", "type": "clarification", "question_id": res2.get("question_id")}
-                            if res2.get("status") == "needs_approval":
-                                return {"status": "interrupted", "type": "approval", "approval_id": res2.get("approval_id")}
-                        else:
-                            # exhausted
-                            return {"status": "failed", "details": {"reason": "retry_exhausted"}}
-                        # if we broke out because succeeded, continue to next node
-                        continue
-                    else:
-                        return {"status": "failed", "details": res}
+                    # Orchestrator is authoritative for retry logic. Propagate failure details upstream.
+                    return {"status": "failed", "details": res}
 
                 if status == "retry":
                     # orchestrator already incremented retry and saved state; stop to allow external retry or re-run
@@ -126,19 +97,14 @@ class LangGraphRunner:
         if not node:
             return {"status": "unknown_stage"}
         agent_id = node.get("agent_id")
-        res = self.orch.invoke_agent_for_stage(self.wf, agent_id, inputs={"clarification_answer": answer, "question_id": question_id})
+        merged_inputs = self.inputs.copy() if self.inputs else {}
+        merged_inputs.update({"clarification_answer": answer, "question_id": question_id})
+        res = self.orch.invoke_agent_for_stage(self.wf, agent_id, inputs=merged_inputs)
         if res.get("status") == "completed":
             # continue running remaining nodes
             return self.run()
         return res
 
-    def resume_after_approval(self, approval_id: str, decision: str) -> Dict[str, Any]:
-        # For V1, approval decisions are applied at workflow level.
-        # Apply approval decision by updating workflow state (clear pending_approval) and continue.
-        # In a real system, approval records would be validated and the approver's identity checked.
-        self.orch.store.write_approval(approval_id, {"approval_id": approval_id, "decision": decision})
-        # clear pending approval and resume
-        self.wf.pending_approval = None
-        self.wf.status = "running"
-        self.orch.save_workflow(self.wf)
-        return self.run()
+    def resume_after_approval(self, approval_id: str, decision: str, feedback: str | None = None) -> Dict[str, Any]:
+        # Delegate approval handling to orchestrator so validation and persistence are authoritative
+        return self.orch.resume_workflow_after_approval(self.wf.workflow_id, approval_id, decision, feedback)

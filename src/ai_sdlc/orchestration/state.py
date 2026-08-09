@@ -37,6 +37,8 @@ class WorkflowState(BaseModel):
     initiator_id: Optional[str] = None
     repository: Dict[str, str] = Field(default_factory=dict)
     stages: Dict[str, str] = Field(default_factory=dict)
+    inputs: Dict[str, Any] = Field(default_factory=dict)
+    pending_clarification: Optional[Dict[str, Any]] = None
     pending_approval: Optional[Dict[str, Any]] = None
     retry_count: Dict[str, int] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utc_now_iso)

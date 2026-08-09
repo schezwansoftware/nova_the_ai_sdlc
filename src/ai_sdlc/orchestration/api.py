@@ -3,6 +3,7 @@ from typing import Optional, Dict, Any, Generic, TypeVar
 from datetime import datetime
 from enum import Enum
 from pydantic import BaseModel, Field, ValidationError
+from uuid import uuid4
 
 from ai_sdlc.orchestration.orchestrator import Orchestrator
 from ai_sdlc.orchestration.state import WorkflowState, utc_now
@@ -96,7 +97,15 @@ class WorkflowStatusData(BaseModel):
 class SubmitClarificationRequest(BaseModel):
     workflow_id: str
     initiator_id: str
+    question_id: str = Field(..., min_length=1)
     response_text: str = Field(..., min_length=1)
+
+
+class SubmitClarificationData(BaseModel):
+    workflow_id: str
+    current_phase: WorkflowPhase
+    status: WorkflowStatusType
+    message: str = Field(default="Clarification accepted. Workflow resuming.")
 
 
 class SubmitClarificationData(BaseModel):
@@ -109,6 +118,7 @@ class SubmitClarificationData(BaseModel):
 class SubmitApprovalRequest(BaseModel):
     workflow_id: str
     initiator_id: str
+    approval_id: str = Field(..., min_length=1)
     approved: bool
     feedback: Optional[str] = None
 
@@ -174,16 +184,20 @@ class OrchestratorAPI:
     def start_workflow(self, req: StartWorkflowRequest) -> APIResponse[StartWorkflowData]:
         # Validate request via pydantic already done by caller
         try:
-            # create workflow state
-            wf_id = f"wf-{req.initiator_id}-{int(utc_now().timestamp())}"
-            wf = WorkflowState(workflow_id=wf_id, current_stage="requirements", initiator_id=req.initiator_id)
+            # create workflow state using collision-resistant id
+            wf_id = f"wf-{uuid4().hex}"
+            wf = WorkflowState(
+                workflow_id=wf_id,
+                current_stage="requirements",
+                initiator_id=req.initiator_id,
+                inputs={"requirement_text": req.raw_requirement, "project_context": req.project_context},
+            )
             self.orch.store.write_workflow(wf)
 
             # execute initial node via internal graph runner
             try:
                 res = self.orch.run_workflow_graph(
                     wf.workflow_id,
-                    inputs={"requirement_text": req.raw_requirement, "project_context": req.project_context},
                 )
             except Exception as e:
                 if self._is_missing_agent_error(e):
@@ -198,7 +212,7 @@ class OrchestratorAPI:
                 initiator_id=wf.initiator_id,
                 current_phase=WorkflowPhase.REQUIREMENTS,
                 status=WorkflowStatusType.RUNNING if res.get("status") != "completed" else WorkflowStatusType.COMPLETED,
-                created_at=utc_now(),
+                created_at=datetime.fromisoformat(wf.created_at.replace("Z", "+00:00")),
             )
             return APIResponse(success=True, data=data)
         except ValidationError as e:
@@ -213,24 +227,36 @@ class OrchestratorAPI:
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.WORKFLOW_NOT_FOUND, message="Workflow not found"))
 
             # map internal state to public enums
-            phase = WorkflowPhase.REQUIREMENTS if wf.current_stage else WorkflowPhase.COMPLETED
-            status = WorkflowStatusType.RUNNING
-            if wf.status == "paused":
-                status = WorkflowStatusType.WAITING_FOR_CLARIFICATION
-            if wf.status == "waiting_for_approval":
-                status = WorkflowStatusType.WAITING_FOR_APPROVAL
-            if wf.status == "failed":
-                status = WorkflowStatusType.FAILED
-            if wf.status == "completed":
-                status = WorkflowStatusType.COMPLETED
-            if wf.status == "cancelled":
-                status = WorkflowStatusType.CANCELLED
+            # Map stages to phases
+            stage_to_phase = {
+                "requirements": WorkflowPhase.REQUIREMENTS,
+                "ux_design": WorkflowPhase.UX_DESIGN,
+                "architecture": WorkflowPhase.ARCHITECTURE,
+                "development": WorkflowPhase.DEVELOPMENT,
+                "testing": WorkflowPhase.TESTING,
+                "security": WorkflowPhase.SECURITY,
+                "code_review": WorkflowPhase.CODE_REVIEW,
+                "documentation": WorkflowPhase.DOCUMENTATION,
+                "pull_request": WorkflowPhase.PULL_REQUEST,
+            }
+
+            phase = stage_to_phase.get(wf.current_stage, WorkflowPhase.REQUIREMENTS if wf.current_stage else WorkflowPhase.COMPLETED)
+
+            status_map = {
+                "running": WorkflowStatusType.RUNNING,
+                "paused": WorkflowStatusType.WAITING_FOR_CLARIFICATION,
+                "waiting_for_approval": WorkflowStatusType.WAITING_FOR_APPROVAL,
+                "failed": WorkflowStatusType.FAILED,
+                "completed": WorkflowStatusType.COMPLETED,
+                "cancelled": WorkflowStatusType.CANCELLED,
+            }
+            status = status_map.get(wf.status, WorkflowStatusType.RUNNING)
 
             pending = None
-            if wf.status == "paused":
-                pending = PendingAction(action_type="CLARIFICATION", prompt_message="clarification requested", target_phase=phase)
-            if wf.status == "waiting_for_approval":
-                pending = PendingAction(action_type="APPROVAL", prompt_message="approval requested", target_phase=phase)
+            if wf.status == "paused" and wf.pending_clarification:
+                pending = PendingAction(action_type="CLARIFICATION", prompt_message=wf.pending_clarification.get("question", "clarification requested"), target_phase=phase, payload_artifact_path=wf.pending_clarification.get("question_id"))
+            if wf.status == "waiting_for_approval" and wf.pending_approval:
+                pending = PendingAction(action_type="APPROVAL", prompt_message="approval requested", target_phase=phase, payload_artifact_path=wf.pending_approval.get("approval_id"))
 
             artifacts_map = wf.stages.copy() if wf.stages else {}
 
@@ -240,7 +266,7 @@ class OrchestratorAPI:
                 current_phase=phase,
                 status=status,
                 pending_action=pending,
-                updated_at=utc_now(),
+                updated_at=datetime.fromisoformat(wf.updated_at.replace("Z", "+00:00")),
                 artifacts=artifacts_map,
             )
             return APIResponse(success=True, data=data)
@@ -257,15 +283,24 @@ class OrchestratorAPI:
             if wf.status != "paused":
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.INVALID_STATE_TRANSITION, message="No active clarification"))
 
+            # validate provided question id matches pending clarification
+            if not wf.pending_clarification or wf.pending_clarification.get("question_id") != req.question_id:
+                return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.INVALID_STATE_TRANSITION, message="Invalid or stale question_id"))
+
             # resume via orchestrator
             try:
-                res = self.orch.resume_workflow_after_clarification(wf.workflow_id, question_id="unknown", answer=req.response_text)
+                res = self.orch.resume_workflow_after_clarification(wf.workflow_id, question_id=req.question_id, answer=req.response_text)
             except Exception as e:
                 if self._is_missing_agent_error(e):
                     return self._orchestration_error(str(e), details={"reason": "missing_agent", "workflow_id": wf.workflow_id})
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.INTERNAL_ORCHESTRATION_ERROR, message=str(e)))
 
-            status = WorkflowStatusType.COMPLETED if res.get("status") == "completed" else WorkflowStatusType.RUNNING
+            if res.get("status") == "completed":
+                status = WorkflowStatusType.COMPLETED
+            elif res.get("status") == "resumed":
+                status = WorkflowStatusType.RUNNING
+            else:
+                status = WorkflowStatusType.RUNNING
             data = SubmitClarificationData(workflow_id=wf.workflow_id, current_phase=WorkflowPhase.REQUIREMENTS, status=status)
             return APIResponse(success=True, data=data)
         except Exception as e:
@@ -283,16 +318,26 @@ class OrchestratorAPI:
             if not req.approved and (not req.feedback or req.feedback.strip() == ""):
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.VALIDATION_ERROR, message="Rejection requires feedback"))
 
+            if not wf.pending_approval or wf.pending_approval.get("approval_id") != req.approval_id:
+                return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.INVALID_STATE_TRANSITION, message="Invalid or stale approval_id"))
+
             decision = "approved" if req.approved else "rejected"
             try:
-                res = self.orch.resume_workflow_after_approval(wf.workflow_id, approval_id="unknown", decision=decision)
+                res = self.orch.resume_workflow_after_approval(wf.workflow_id, approval_id=req.approval_id, decision=decision, feedback=req.feedback)
             except Exception as e:
                 if self._is_missing_agent_error(e):
                     return self._orchestration_error(str(e), details={"reason": "missing_agent", "workflow_id": wf.workflow_id})
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.INTERNAL_ORCHESTRATION_ERROR, message=str(e)))
 
-            status = WorkflowStatusType.COMPLETED if res.get("status") == "completed" else WorkflowStatusType.RUNNING
-            msg = "Approved and resumed" if req.approved else "Rejected and returned for revision"
+            if res.get("status") == "completed":
+                status = WorkflowStatusType.COMPLETED
+                msg = "Approved and resumed"
+            elif res.get("status") == "rejected":
+                status = WorkflowStatusType.RUNNING
+                msg = "Rejected: workflow requires revision"
+            else:
+                status = WorkflowStatusType.RUNNING
+                msg = "Decision processed"
             data = SubmitApprovalData(workflow_id=wf.workflow_id, current_phase=WorkflowPhase.REQUIREMENTS, status=status, message=msg)
             return APIResponse(success=True, data=data)
         except Exception as e:

@@ -52,11 +52,11 @@ def test_clarification_submit_and_resume(tmp_path):
     api.orch.register_agent("po", POAgent())
 
     wf = WorkflowState(workflow_id="wf-c", current_stage="requirements", initiator_id="u2")
-    api.orch.store.write_workflow(wf)
     wf.status = "paused"
-    api.orch.save_workflow(wf)
+    wf.pending_clarification = {"question_id": "q-1234", "stage": "requirements", "question": "Please clarify", "inputs": {}}
+    api.orch.store.write_workflow(wf)
 
-    req = SubmitClarificationRequest(workflow_id=wf.workflow_id, initiator_id="u2", response_text="Yes use CSV")
+    req = SubmitClarificationRequest(workflow_id=wf.workflow_id, initiator_id="u2", question_id="q-1234", response_text="Yes use CSV")
     resp = api.submit_clarification(req)
     assert resp.success
     assert resp.data.status is not None
@@ -68,11 +68,10 @@ def test_clarification_submission_requires_paused_state(tmp_path):
     api = OrchestratorAPI(str(workspace))
 
     wf = WorkflowState(workflow_id="wf-c2", current_stage="requirements", initiator_id="u2")
-    api.orch.store.write_workflow(wf)
     wf.status = "running"
-    api.orch.save_workflow(wf)
+    api.orch.store.write_workflow(wf)
 
-    req = SubmitClarificationRequest(workflow_id=wf.workflow_id, initiator_id="u2", response_text="Yes use CSV")
+    req = SubmitClarificationRequest(workflow_id=wf.workflow_id, initiator_id="u2", question_id="q-unknown", response_text="Yes use CSV")
     resp = api.submit_clarification(req)
     assert not resp.success
     assert resp.error is not None
@@ -86,11 +85,11 @@ def test_approval_submit_and_resume(tmp_path):
     api.orch.register_agent("po", POAgent())
 
     wf = WorkflowState(workflow_id="wf-a", current_stage="requirements", initiator_id="u3")
-    api.orch.store.write_workflow(wf)
     wf.status = "waiting_for_approval"
-    api.orch.save_workflow(wf)
+    wf.pending_approval = {"approval_id": "approval-1234", "stage": "requirements", "artifact": {}, "inputs": {}}
+    api.orch.store.write_workflow(wf)
 
-    req = SubmitApprovalRequest(workflow_id=wf.workflow_id, initiator_id="u3", approved=True)
+    req = SubmitApprovalRequest(workflow_id=wf.workflow_id, initiator_id="u3", approval_id="approval-1234", approved=True)
     resp = api.submit_approval(req)
     assert resp.success
 
@@ -105,7 +104,7 @@ def test_approval_submission_requires_waiting_state(tmp_path):
     wf.status = "running"
     api.orch.save_workflow(wf)
 
-    req = SubmitApprovalRequest(workflow_id=wf.workflow_id, initiator_id="u3", approved=True)
+    req = SubmitApprovalRequest(workflow_id=wf.workflow_id, initiator_id="u3", approval_id="approval-unknown", approved=True)
     resp = api.submit_approval(req)
     assert not resp.success
     assert resp.error is not None

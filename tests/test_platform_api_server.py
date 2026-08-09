@@ -131,6 +131,7 @@ def test_platform_http_api_submit_clarification_and_resume(tmp_path: Path):
         current_stage="requirements",
         initiator_id="u2",
         status="paused",
+        pending_clarification={"question_id": "q-clarify", "stage": "requirements", "question": "Please confirm requirements", "inputs": {}},
     )
     store.write_workflow(wf)
 
@@ -138,6 +139,7 @@ def test_platform_http_api_submit_clarification_and_resume(tmp_path: Path):
     try:
         status, body = _http_request(server, "POST", "/v1/workflows/wf-clarify/clarifications", {
             "initiator_id": "u2",
+            "question_id": "q-clarify",
             "response_text": "Yes use CSV",
         })
         assert status == 200
@@ -156,7 +158,7 @@ def test_platform_http_api_submit_approval_and_resume(tmp_path: Path):
         current_stage="requirements",
         initiator_id="u3",
         status="waiting_for_approval",
-        pending_approval={"stage": "requirements"},
+        pending_approval={"approval_id": "approval-approve", "stage": "requirements", "artifact": {}, "inputs": {}},
     )
     store.write_workflow(wf)
 
@@ -164,6 +166,7 @@ def test_platform_http_api_submit_approval_and_resume(tmp_path: Path):
     try:
         status, body = _http_request(server, "POST", "/v1/workflows/wf-approve/approvals", {
             "initiator_id": "u3",
+            "approval_id": "approval-approve",
             "approved": True,
             "feedback": "Looks good.",
         })
@@ -204,6 +207,7 @@ def test_platform_http_api_reports_conflict_for_invalid_state_transition(tmp_pat
     try:
         status, body = _http_request(server, "POST", "/v1/workflows/wf-conflict/clarifications", {
             "initiator_id": "u4",
+            "question_id": "q-conflict",
             "response_text": "More detail please",
         })
         assert status == 409
