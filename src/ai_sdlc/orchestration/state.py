@@ -1,6 +1,8 @@
 from __future__ import annotations
 import contextlib
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Dict, Optional, Any
 
@@ -68,30 +70,39 @@ class StateStore:
 
     @contextlib.contextmanager
     def _locked(self, exclusive: bool = True):
-        self.lock_path.touch(exist_ok=True)
-        with open(self.lock_path, "r+", encoding="utf-8") as lock_file:
+        lock_fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
             if fcntl is not None:
                 flock_flag = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-                fcntl.flock(lock_file.fileno(), flock_flag)
+                fcntl.flock(lock_fd, flock_flag)
             try:
                 yield
             finally:
                 if fcntl is not None:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+
+    def _atomic_write_text(self, path: Path, content: str) -> None:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.state_dir, delete=False) as handle:
+            handle.write(content)
+            temp_path = Path(handle.name)
+        os.replace(temp_path, path)
+
+    def _atomic_write_json(self, path: Path, payload: Dict[str, Any]) -> None:
+        self._atomic_write_text(path, json.dumps(payload, indent=2))
 
     def read_workflow(self) -> Optional[WorkflowState]:
-        if not self.workflow_path.exists():
-            return None
         with self._locked(exclusive=False):
+            if not self.workflow_path.exists():
+                return None
             data = json.loads(self.workflow_path.read_text(encoding="utf-8"))
         return WorkflowState(**data)
 
     def write_workflow(self, state: WorkflowState) -> None:
         state.updated_at = utc_now_iso()
-        tmp = self.state_dir / "workflow.json.tmp"
         with self._locked(exclusive=True):
-            tmp.write_text(state.model_dump_json(indent=2), encoding="utf-8")
-            tmp.rename(self.workflow_path)
+            self._atomic_write_text(self.workflow_path, state.model_dump_json(indent=2))
 
     def append_audit_event(self, event: Dict) -> None:
         event.setdefault("timestamp", utc_now_iso())
@@ -103,17 +114,17 @@ class StateStore:
     def write_approval(self, approval_id: str, approval_record: Dict) -> Path:
         path = self.approvals_dir / f"{approval_id}.json"
         with self._locked(exclusive=True):
-            path.write_text(json.dumps(approval_record, indent=2), encoding="utf-8")
+            self._atomic_write_json(path, approval_record)
         return path
 
     def write_change_request(self, cr_id: str, cr_record: Dict) -> Path:
         path = self.changes_dir / f"{cr_id}.json"
         with self._locked(exclusive=True):
-            path.write_text(json.dumps(cr_record, indent=2), encoding="utf-8")
+            self._atomic_write_json(path, cr_record)
         return path
 
     def write_clarification(self, question_id: str, question_record: Dict) -> Path:
         path = self.clarifications_dir / f"{question_id}.json"
         with self._locked(exclusive=True):
-            path.write_text(json.dumps(question_record, indent=2), encoding="utf-8")
+            self._atomic_write_json(path, question_record)
         return path

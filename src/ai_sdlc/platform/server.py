@@ -10,13 +10,15 @@ from pydantic import ValidationError
 
 from ai_sdlc.platform.core import CorePlatform
 from ai_sdlc.orchestration.api import (
+    APIErrorDetail,
     APIResponse,
-    StartWorkflowRequest,
-    GetWorkflowStatusRequest,
-    SubmitClarificationRequest,
-    SubmitApprovalRequest,
-    ResumeWorkflowRequest,
     CancelWorkflowRequest,
+    ErrorCode,
+    GetWorkflowStatusRequest,
+    ResumeWorkflowRequest,
+    StartWorkflowRequest,
+    SubmitApprovalRequest,
+    SubmitClarificationRequest,
 )
 
 
@@ -27,9 +29,34 @@ def _json_response(response: APIResponse) -> bytes:
 class PlatformHTTPRequestHandler(BaseHTTPRequestHandler):
     backend: CorePlatform
 
-    def _send_json(self, response: APIResponse, status_code: int = 200) -> None:
+    def _response_status_code(self, response: APIResponse) -> int:
+        if getattr(response, "success", False):
+            return 200
+
+        error = getattr(response, "error", None)
+        code = None
+        if error is not None:
+            if hasattr(error, "code"):
+                code = error.code
+            elif isinstance(error, dict):
+                code = error.get("code")
+
+        if code == ErrorCode.VALIDATION_ERROR:
+            return 400
+        if code == ErrorCode.WORKFLOW_NOT_FOUND:
+            return 404
+        if code == ErrorCode.UNAUTHORIZED_INITIATOR:
+            return 403
+        if code == ErrorCode.INVALID_STATE_TRANSITION:
+            return 409
+        if code == ErrorCode.LOCK_ACQUISITION_FAILED:
+            return 503
+        return 500
+
+    def _send_json(self, response: APIResponse, status_code: int | None = None) -> None:
         payload = _json_response(response)
-        self.send_response(status_code)
+        resolved_status = self._response_status_code(response) if status_code is None else status_code
+        self.send_response(resolved_status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
@@ -46,7 +73,13 @@ class PlatformHTTPRequestHandler(BaseHTTPRequestHandler):
         try:
             body = self._read_body()
         except json.JSONDecodeError:
-            self._send_json(APIResponse(success=False, error={"code": "VALIDATION_ERROR", "message": "Invalid JSON payload"}), status_code=400)
+            self._send_json(
+                APIResponse(
+                    success=False,
+                    error=APIErrorDetail(code=ErrorCode.VALIDATION_ERROR, message="Invalid JSON payload"),
+                ),
+                status_code=400,
+            )
             return
 
         try:
@@ -55,14 +88,14 @@ class PlatformHTTPRequestHandler(BaseHTTPRequestHandler):
         except ValidationError as validation_error:
             response = APIResponse(
                 success=False,
-                error={
-                    "code": "VALIDATION_ERROR",
-                    "message": str(validation_error),
-                },
+                error=APIErrorDetail(code=ErrorCode.VALIDATION_ERROR, message=str(validation_error)),
             )
             self._send_json(response, status_code=400)
         except Exception as exc:
-            response = APIResponse(success=False, error={"code": "INTERNAL_ORCHESTRATION_ERROR", "message": str(exc)})
+            response = APIResponse(
+                success=False,
+                error=APIErrorDetail(code=ErrorCode.INTERNAL_ORCHESTRATION_ERROR, message=str(exc)),
+            )
             self._send_json(response, status_code=500)
 
     def do_POST(self) -> None:

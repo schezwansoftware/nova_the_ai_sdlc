@@ -1,8 +1,8 @@
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from http.client import HTTPConnection
 from pathlib import Path
-from urllib.parse import urlparse
 
 from ai_sdlc.orchestration.state import StateStore, WorkflowState
 from ai_sdlc.platform.server import run_platform_server
@@ -56,6 +56,24 @@ def test_state_store_uses_lock_file(tmp_path: Path):
     loaded = store.read_workflow()
     assert loaded is not None
     assert loaded.workflow_id == "wf-lock"
+    assert loaded.current_stage == "requirements"
+
+
+def test_state_store_handles_concurrent_writes(tmp_path: Path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    store = StateStore(workspace)
+
+    def write_workflow(index: int) -> None:
+        wf = WorkflowState(workflow_id=f"wf-{index}", current_stage="requirements")
+        store.write_workflow(wf)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(write_workflow, range(8)))
+
+    loaded = store.read_workflow()
+    assert loaded is not None
+    assert loaded.workflow_id.startswith("wf-")
     assert loaded.current_stage == "requirements"
 
 
@@ -153,6 +171,44 @@ def test_platform_http_api_submit_approval_and_resume(tmp_path: Path):
         assert body["success"] is True
         assert body["data"]["workflow_id"] == "wf-approve"
         assert body["data"]["status"] in ("RUNNING", "COMPLETED")
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_platform_http_api_reports_not_found_for_missing_workflow(tmp_path: Path):
+    workspace = prepare_workspace_with_po(tmp_path)
+    server, thread = _start_server(workspace)
+    try:
+        status, body = _http_request(server, "GET", "/v1/workflows/missing-workflow")
+        assert status == 404
+        assert body["success"] is False
+        assert body["error"]["code"] == "WORKFLOW_NOT_FOUND"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_platform_http_api_reports_conflict_for_invalid_state_transition(tmp_path: Path):
+    workspace = prepare_workspace_with_po(tmp_path)
+    store = StateStore(workspace)
+    wf = WorkflowState(
+        workflow_id="wf-conflict",
+        current_stage="requirements",
+        initiator_id="u4",
+        status="running",
+    )
+    store.write_workflow(wf)
+
+    server, thread = _start_server(workspace)
+    try:
+        status, body = _http_request(server, "POST", "/v1/workflows/wf-conflict/clarifications", {
+            "initiator_id": "u4",
+            "response_text": "More detail please",
+        })
+        assert status == 409
+        assert body["success"] is False
+        assert body["error"]["code"] == "INVALID_STATE_TRANSITION"
     finally:
         server.shutdown()
         thread.join(timeout=5)
