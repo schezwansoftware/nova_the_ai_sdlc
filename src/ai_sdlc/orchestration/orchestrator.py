@@ -24,8 +24,8 @@ class Orchestrator:
     def register_agent(self, agent_id: str, agent_obj: Any):
         self.registry.register(agent_id, agent_obj)
 
-    def load_workflow(self) -> Optional[WorkflowState]:
-        return self.store.read_workflow()
+    def load_workflow(self, workflow_id: Optional[str] = None) -> Optional[WorkflowState]:
+        return self.store.read_workflow(workflow_id)
 
     def save_workflow(self, wf: WorkflowState) -> None:
         self.store.write_workflow(wf)
@@ -39,8 +39,8 @@ class Orchestrator:
         # execution) is one compound transaction so concurrent requests
         # against the same workflow can't interleave and lose updates.
         with self.store.transaction():
-            wf = self.load_workflow()
-            if not wf or wf.workflow_id != workflow_id:
+            wf = self.load_workflow(workflow_id)
+            if not wf:
                 raise RuntimeError("workflow not found")
             from ai_sdlc.orchestration.langgraph_runner import LangGraphRunner
             nodes = [
@@ -51,8 +51,8 @@ class Orchestrator:
 
     def resume_workflow_after_clarification(self, workflow_id: str, question_id: str, answer: str) -> Dict[str, Any]:
         with self.store.transaction():
-            wf = self.load_workflow()
-            if not wf or wf.workflow_id != workflow_id:
+            wf = self.load_workflow(workflow_id)
+            if not wf:
                 raise RuntimeError("workflow not found")
             # Validate pending clarification
             if not wf.pending_clarification or wf.pending_clarification.get("question_id") != question_id:
@@ -74,20 +74,33 @@ class Orchestrator:
             # clear pending clarification and set inputs for resume
             wf.pending_clarification = None
             wf.status = WorkflowStatus.RUNNING
+            # Persist the answer onto wf.inputs itself (accumulated by
+            # question_id), not just a transient local dict, so a later
+            # clarification round doesn't silently drop this round's answer
+            # — wf.inputs is what invoke_agent_for_stage merges into every
+            # subsequent agent call, including future rounds.
+            clarification_answers = dict(wf.inputs.get("clarification_answers", {}))
+            clarification_answers[question_id] = answer
+            wf.inputs = {
+                **wf.inputs,
+                "clarification_answers": clarification_answers,
+                "clarification_answer": answer,
+                "question_id": question_id,
+            }
             self.save_workflow(wf)
 
-            # resume by invoking runner with merged inputs
+            # resume by invoking runner; invoke_agent_for_stage will merge
+            # the now-updated wf.inputs (including clarification_answers)
+            # into the agent's request automatically.
             from ai_sdlc.orchestration.langgraph_runner import LangGraphRunner
             nodes = [{"id": "requirements", "type": "agent", "agent_id": "po"}]
-            merged_inputs = wf.inputs.copy() if wf.inputs else {}
-            merged_inputs.update({"clarification_answer": answer, "question_id": question_id})
-            runner = LangGraphRunner(self, wf, nodes=nodes, inputs=merged_inputs)
+            runner = LangGraphRunner(self, wf, nodes=nodes)
             return runner.resume_after_clarification(answer, question_id)
 
     def resume_workflow_after_approval(self, workflow_id: str, approval_id: str, decision: str, feedback: str | None = None) -> Dict[str, Any]:
         with self.store.transaction():
-            wf = self.load_workflow()
-            if not wf or wf.workflow_id != workflow_id:
+            wf = self.load_workflow(workflow_id)
+            if not wf:
                 raise RuntimeError("workflow not found")
             # Validate pending approval
             if not wf.pending_approval or wf.pending_approval.get("approval_id") != approval_id:

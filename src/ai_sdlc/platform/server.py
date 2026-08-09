@@ -72,11 +72,15 @@ class PlatformHTTPRequestHandler(BaseHTTPRequestHandler):
     def _handle_request(self, handler):
         try:
             body = self._read_body()
-        except json.JSONDecodeError:
+        except ValueError:
+            # Covers both a malformed JSON body (json.JSONDecodeError, which
+            # is itself a ValueError subclass) and a non-numeric
+            # Content-Length header (int() raising ValueError) — both are
+            # client input problems, not server bugs.
             self._send_json(
                 APIResponse(
                     success=False,
-                    error=APIErrorDetail(code=ErrorCode.VALIDATION_ERROR, message="Invalid JSON payload"),
+                    error=APIErrorDetail(code=ErrorCode.VALIDATION_ERROR, message="Invalid request body or headers"),
                 ),
                 status_code=400,
             )
@@ -144,20 +148,29 @@ class PlatformHTTPRequestHandler(BaseHTTPRequestHandler):
         request = GetWorkflowStatusRequest(workflow_id=workflow_id)
         return self.backend.get_workflow_status(request)
 
+    @staticmethod
+    def _body_without_workflow_id(body: Dict[str, Any]) -> Dict[str, Any]:
+        # The URL path segment is the authoritative workflow_id for these
+        # routes; a client that (correctly, since it's a required schema
+        # field) also includes workflow_id in the body would otherwise
+        # collide with the explicit keyword argument below and raise a
+        # Python TypeError instead of a clean validation result.
+        return {k: v for k, v in body.items() if k != "workflow_id"}
+
     def _submit_clarification(self, workflow_id: str, body: Dict[str, Any]) -> APIResponse:
-        request = SubmitClarificationRequest(workflow_id=workflow_id, **body)
+        request = SubmitClarificationRequest(workflow_id=workflow_id, **self._body_without_workflow_id(body))
         return self.backend.submit_clarification(request)
 
     def _submit_approval(self, workflow_id: str, body: Dict[str, Any]) -> APIResponse:
-        request = SubmitApprovalRequest(workflow_id=workflow_id, **body)
+        request = SubmitApprovalRequest(workflow_id=workflow_id, **self._body_without_workflow_id(body))
         return self.backend.submit_approval(request)
 
     def _resume_workflow(self, workflow_id: str, body: Dict[str, Any]) -> APIResponse:
-        request = ResumeWorkflowRequest(workflow_id=workflow_id, **body)
+        request = ResumeWorkflowRequest(workflow_id=workflow_id, **self._body_without_workflow_id(body))
         return self.backend.resume_workflow(request)
 
     def _cancel_workflow(self, workflow_id: str, body: Dict[str, Any]) -> APIResponse:
-        request = CancelWorkflowRequest(workflow_id=workflow_id, **body)
+        request = CancelWorkflowRequest(workflow_id=workflow_id, **self._body_without_workflow_id(body))
         return self.backend.cancel_workflow(request)
 
     def log_message(self, format: str, *args: Any) -> None:

@@ -241,6 +241,83 @@ def test_get_workflow_status_unknown_internal_status_is_not_silently_running(tmp
     assert resp.error.code == ErrorCode.INTERNAL_ORCHESTRATION_ERROR
 
 
+def test_resume_workflow_blocked_while_waiting_for_clarification(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    api = OrchestratorAPI(str(workspace))
+    api.orch.register_agent("po", POAgent())
+
+    qid = "q-pending"
+    wf = WorkflowState(
+        workflow_id="wf-resume-clar",
+        current_stage="requirements",
+        initiator_id="u6",
+        status="paused",
+        pending_clarification={"question_id": qid, "stage": "requirements", "question": "which fields?", "inputs": {}},
+    )
+    api.orch.store.write_workflow(wf)
+
+    resp = api.resume_workflow(ResumeWorkflowRequest(workflow_id=wf.workflow_id, initiator_id="u6"))
+    assert not resp.success
+    assert resp.error.code == ErrorCode.INVALID_STATE_TRANSITION
+
+    # resume must not have touched the pending interaction
+    untouched = api.orch.load_workflow(wf.workflow_id)
+    assert untouched.status == "paused"
+    assert untouched.pending_clarification["question_id"] == qid
+
+
+def test_resume_workflow_blocked_while_waiting_for_approval(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    api = OrchestratorAPI(str(workspace))
+    api.orch.register_agent("po", POAgent())
+
+    aid = "approval-pending"
+    wf = WorkflowState(
+        workflow_id="wf-resume-appr",
+        current_stage="requirements",
+        initiator_id="u7",
+        status="waiting_for_approval",
+        pending_approval={"approval_id": aid, "stage": "requirements", "artifact": {}, "inputs": {}},
+    )
+    api.orch.store.write_workflow(wf)
+
+    resp = api.resume_workflow(ResumeWorkflowRequest(workflow_id=wf.workflow_id, initiator_id="u7"))
+    assert not resp.success
+    assert resp.error.code == ErrorCode.INVALID_STATE_TRANSITION
+
+    # resume must not have overwritten the pending approval with a new id
+    untouched = api.orch.load_workflow(wf.workflow_id)
+    assert untouched.status == "waiting_for_approval"
+    assert untouched.pending_approval["approval_id"] == aid
+
+
+def test_get_workflow_status_pending_action_uses_interaction_id_field(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    api = OrchestratorAPI(str(workspace))
+
+    qid = "q-field-check"
+    wf = WorkflowState(
+        workflow_id="wf-field-check",
+        current_stage="requirements",
+        initiator_id="u8",
+        status="paused",
+        pending_clarification={"question_id": qid, "stage": "requirements", "question": "which fields?", "inputs": {}},
+    )
+    api.orch.store.write_workflow(wf)
+
+    resp = api.get_workflow_status(GetWorkflowStatusRequest(workflow_id=wf.workflow_id))
+    assert resp.success
+    pending = resp.data.pending_action
+    assert pending is not None
+    # the interaction id must live in its own named field, not be smuggled
+    # into payload_artifact_path (which is for actual artifact paths)
+    assert pending.interaction_id == qid
+    assert pending.payload_artifact_path is None
+
+
 def test_resume_and_cancel(tmp_path):
     workspace = tmp_path / "repo"
     workspace.mkdir()

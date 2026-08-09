@@ -29,15 +29,19 @@ class LangGraphRunner:
         else:
             self.nodes = nodes
 
-    def run(self) -> Dict[str, Any]:
-        # Execute nodes sequentially from the current_stage position
-        start_index = 0
-        if self.wf.current_stage:
-            # find node index matching current stage
-            for i, n in enumerate(self.nodes):
-                if n.get("id") == self.wf.current_stage:
-                    start_index = i
-                    break
+    def run(self, start_index: Optional[int] = None) -> Dict[str, Any]:
+        # Execute nodes sequentially from the current_stage position, unless
+        # the caller already knows exactly which index to resume from (used
+        # by resume_after_clarification to avoid re-matching current_stage,
+        # which still points at the node it just finished).
+        if start_index is None:
+            start_index = 0
+            if self.wf.current_stage:
+                # find node index matching current stage
+                for i, n in enumerate(self.nodes):
+                    if n.get("id") == self.wf.current_stage:
+                        start_index = i
+                        break
 
         for i in range(start_index, len(self.nodes)):
             node = self.nodes[i]
@@ -85,22 +89,33 @@ class LangGraphRunner:
         return {"status": "completed"}
 
     def resume_after_clarification(self, answer: str, question_id: str) -> Dict[str, Any]:
-        # Provide the answer as input to the current agent and continue execution
-        # Find which agent requested clarification by reading the clarification file (not strictly required here)
-        # For simplicity, pass the answer as input to invoke_agent_for_stage
-        # Call invoke_agent_for_stage with inputs including clarification_answer
+        # Provide the answer as input to the current agent and continue execution.
         current_stage = self.wf.current_stage
         if not current_stage:
             return {"status": "no_active_stage"}
         # Find node for current stage
-        node = next((n for n in self.nodes if n.get("id") == current_stage), None)
-        if not node:
+        node_index = next((i for i, n in enumerate(self.nodes) if n.get("id") == current_stage), None)
+        if node_index is None:
             return {"status": "unknown_stage"}
-        agent_id = node.get("agent_id")
+        agent_id = self.nodes[node_index].get("agent_id")
         merged_inputs = self.inputs.copy() if self.inputs else {}
         merged_inputs.update({"clarification_answer": answer, "question_id": question_id})
         res = self.orch.invoke_agent_for_stage(self.wf, agent_id, inputs=merged_inputs)
-        if res.get("status") == "completed":
-            # continue running remaining nodes
-            return self.run()
-        return res
+        if res.get("status") != "completed":
+            return res
+
+        # This node is done. Advance past it before continuing, rather than
+        # calling run() with current_stage still pointing at the node we
+        # just finished — otherwise run() would re-match this same stage
+        # and invoke the agent a second time for one resume.
+        next_index = node_index + 1
+        if next_index >= len(self.nodes):
+            self.wf.current_stage = None
+            self.wf.status = WorkflowStatus.COMPLETED
+            self.orch.save_workflow(self.wf)
+            self.orch._emit({"event": "workflow_completed", "workflow_id": self.wf.workflow_id})
+            return {"status": "completed"}
+
+        self.wf.current_stage = self.nodes[next_index].get("id")
+        self.orch.save_workflow(self.wf)
+        return self.run(start_index=next_index)

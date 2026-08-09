@@ -1,4 +1,5 @@
 import json
+import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from http.client import HTTPConnection
@@ -42,6 +43,35 @@ def _http_request(server, method: str, path: str, body=None):
     data = response.read().decode("utf-8")
     conn.close()
     return response.status, json.loads(data)
+
+
+def _raw_http_post(server, path: str, header_lines: str, body: bytes) -> tuple[int, bytes]:
+    """Send a hand-crafted HTTP request so we can set a malformed header
+    that http.client would refuse to send as-is."""
+    host, port = server.server_address[0], server.server_address[1]
+    with socket.create_connection((host, port), timeout=5) as sock:
+        request = (
+            f"POST {path} HTTP/1.1\r\n"
+            f"Host: {host}\r\n"
+            f"{header_lines}\r\n"
+            f"Connection: close\r\n"
+            f"\r\n"
+        ).encode("utf-8") + body
+        sock.sendall(request)
+        sock.settimeout(5)
+        response = b""
+        try:
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+        except socket.timeout:
+            pass
+    assert response, "server closed the connection without sending any HTTP response"
+    status_line = response.split(b"\r\n", 1)[0].decode("utf-8")
+    status_code = int(status_line.split(" ")[1])
+    return status_code, response
 
 
 def test_state_store_uses_lock_file(tmp_path: Path):
@@ -540,6 +570,90 @@ def test_platform_http_api_submit_approval_rejected_reports_revision_required(tm
         status, body = _http_request(server, "GET", "/v1/workflows/wf-appr-reject")
         assert status == 200
         assert body["data"]["status"] == "REVISION_REQUIRED"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_platform_http_api_two_workflows_coexist(tmp_path: Path):
+    workspace = prepare_workspace_with_po(tmp_path)
+    server, thread = _start_server(workspace)
+    try:
+        status, body_a = _http_request(server, "POST", "/v1/workflows", {
+            "initiator_id": "alice",
+            "raw_requirement": "Add export functionality for customers.",
+            "project_context": {},
+        })
+        assert status == 200
+        wf_a_id = body_a["data"]["workflow_id"]
+
+        # Starting a second workflow in the same workspace must not clobber
+        # the first — each remains independently reachable by its own id.
+        status, body_b = _http_request(server, "POST", "/v1/workflows", {
+            "initiator_id": "bob",
+            "raw_requirement": "Add import functionality for vendors.",
+            "project_context": {},
+        })
+        assert status == 200
+        wf_b_id = body_b["data"]["workflow_id"]
+        assert wf_a_id != wf_b_id
+
+        status, get_a = _http_request(server, "GET", f"/v1/workflows/{wf_a_id}")
+        assert status == 200
+        assert get_a["data"]["workflow_id"] == wf_a_id
+        assert get_a["data"]["initiator_id"] == "alice"
+
+        status, get_b = _http_request(server, "GET", f"/v1/workflows/{wf_b_id}")
+        assert status == 200
+        assert get_b["data"]["workflow_id"] == wf_b_id
+        assert get_b["data"]["initiator_id"] == "bob"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_platform_http_api_workflow_id_in_body_does_not_crash(tmp_path: Path):
+    workspace = prepare_workspace_with_po(tmp_path)
+    store = StateStore(workspace)
+    wf = WorkflowState(
+        workflow_id="wf-body-id",
+        current_stage="requirements",
+        initiator_id="u9",
+        status="paused",
+        pending_clarification={"question_id": "q-body", "stage": "requirements", "question": "which fields?", "inputs": {}},
+    )
+    store.write_workflow(wf)
+
+    server, thread = _start_server(workspace)
+    try:
+        # workflow_id is a required field on the schema, so a spec-compliant
+        # client including it in the body (in addition to the URL) must not
+        # crash the handler.
+        status, body = _http_request(server, "POST", "/v1/workflows/wf-body-id/clarifications", {
+            "workflow_id": "wf-body-id",
+            "initiator_id": "u9",
+            "question_id": "q-body",
+            "response_text": "Yes use CSV",
+        })
+        assert status == 200
+        assert body["success"] is True
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_platform_http_api_malformed_content_length_returns_clean_400(tmp_path: Path):
+    workspace = prepare_workspace_with_po(tmp_path)
+    server, thread = _start_server(workspace)
+    try:
+        status_code, raw = _raw_http_post(
+            server,
+            "/v1/workflows",
+            "Content-Type: application/json\r\nContent-Length: not-a-number",
+            b'{"initiator_id": "u1", "raw_requirement": "test requirement text"}',
+        )
+        assert status_code == 400
+        assert b"VALIDATION_ERROR" in raw
     finally:
         server.shutdown()
         thread.join(timeout=5)

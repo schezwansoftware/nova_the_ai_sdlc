@@ -35,7 +35,7 @@ class WorkflowStatus(str):
 
     Values are the authoritative on-disk string representations; do not
     change them without a migration, since they are persisted in
-    .ai-sdlc/workflow.json.
+    .ai-sdlc/workflows/{workflow_id}.json.
     """
 
     RUNNING = "running"
@@ -81,7 +81,15 @@ class StateStore:
         self.workspace = Path(workspace)
         self.state_dir = self.workspace / ".ai-sdlc"
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        self.workflow_path = self.state_dir / "workflow.json"
+        # Each workflow gets its own file, keyed by workflow_id, so the
+        # REST API's per-id addressing (/v1/workflows/{id}) doesn't clobber
+        # other in-flight workflows in the same workspace. `current_pointer_path`
+        # tracks the most-recently-written workflow_id purely so that legacy
+        # no-id callers (read_workflow()/write_workflow() with no id) keep
+        # working for the common single-workflow-per-workspace case.
+        self.workflows_dir = self.state_dir / "workflows"
+        self.workflows_dir.mkdir(parents=True, exist_ok=True)
+        self.current_pointer_path = self.state_dir / "current_workflow.json"
         self.lock_path = self.state_dir / "workflow.lock"
 
         self.audit_path = self.state_dir / "audit"
@@ -143,17 +151,34 @@ class StateStore:
     def _atomic_write_json(self, path: Path, payload: Dict[str, Any]) -> None:
         self._atomic_write_text(path, json.dumps(payload, indent=2))
 
-    def read_workflow(self) -> Optional[WorkflowState]:
+    def _workflow_path(self, workflow_id: str) -> Path:
+        return self.workflows_dir / f"{workflow_id}.json"
+
+    def _read_current_pointer(self) -> Optional[str]:
+        if not self.current_pointer_path.exists():
+            return None
+        try:
+            return json.loads(self.current_pointer_path.read_text(encoding="utf-8")).get("workflow_id")
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    def read_workflow(self, workflow_id: Optional[str] = None) -> Optional[WorkflowState]:
         with self._locked(exclusive=False):
-            if not self.workflow_path.exists():
+            if workflow_id is None:
+                workflow_id = self._read_current_pointer()
+                if workflow_id is None:
+                    return None
+            path = self._workflow_path(workflow_id)
+            if not path.exists():
                 return None
-            data = json.loads(self.workflow_path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
         return WorkflowState(**data)
 
     def write_workflow(self, state: WorkflowState) -> None:
         state.updated_at = utc_now_iso()
         with self._locked(exclusive=True):
-            self._atomic_write_text(self.workflow_path, state.model_dump_json(indent=2))
+            self._atomic_write_text(self._workflow_path(state.workflow_id), state.model_dump_json(indent=2))
+            self._atomic_write_text(self.current_pointer_path, json.dumps({"workflow_id": state.workflow_id}))
 
     def append_audit_event(self, event: Dict) -> None:
         event.setdefault("timestamp", utc_now_iso())

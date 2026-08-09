@@ -94,6 +94,7 @@ class PendingAction(StrictModel):
     action_type: str
     prompt_message: str
     target_phase: WorkflowPhase
+    interaction_id: Optional[str] = None
     payload_artifact_path: Optional[str] = None
 
 
@@ -253,7 +254,7 @@ class OrchestratorAPI:
                     )
                 raise
 
-            wf = self.orch.load_workflow()
+            wf = self.orch.load_workflow(wf.workflow_id)
             data = StartWorkflowData(
                 workflow_id=wf.workflow_id,
                 initiator_id=wf.initiator_id,
@@ -269,8 +270,8 @@ class OrchestratorAPI:
 
     def get_workflow_status(self, req: GetWorkflowStatusRequest) -> APIResponse[WorkflowStatusData]:
         try:
-            wf = self.orch.load_workflow()
-            if not wf or wf.workflow_id != req.workflow_id:
+            wf = self.orch.load_workflow(req.workflow_id)
+            if not wf:
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.WORKFLOW_NOT_FOUND, message="Workflow not found"))
 
             # map internal state to public enums; unknown internal state is a
@@ -280,9 +281,21 @@ class OrchestratorAPI:
 
             pending = None
             if wf.status == WorkflowStatus.WAITING_FOR_CLARIFICATION and wf.pending_clarification:
-                pending = PendingAction(action_type="CLARIFICATION", prompt_message=wf.pending_clarification.get("question", "clarification requested"), target_phase=phase, payload_artifact_path=wf.pending_clarification.get("question_id"))
+                pending = PendingAction(
+                    action_type="CLARIFICATION",
+                    prompt_message=wf.pending_clarification.get("question", "clarification requested"),
+                    target_phase=phase,
+                    interaction_id=wf.pending_clarification.get("question_id"),
+                )
             if wf.status == WorkflowStatus.WAITING_FOR_APPROVAL and wf.pending_approval:
-                pending = PendingAction(action_type="APPROVAL", prompt_message="approval requested", target_phase=phase, payload_artifact_path=wf.pending_approval.get("approval_id"))
+                artifact = wf.pending_approval.get("artifact") or {}
+                pending = PendingAction(
+                    action_type="APPROVAL",
+                    prompt_message="approval requested",
+                    target_phase=phase,
+                    interaction_id=wf.pending_approval.get("approval_id"),
+                    payload_artifact_path=artifact.get("path"),
+                )
 
             artifacts_map = wf.stages.copy() if wf.stages else {}
 
@@ -301,8 +314,8 @@ class OrchestratorAPI:
 
     def submit_clarification(self, req: SubmitClarificationRequest) -> APIResponse[SubmitClarificationData]:
         try:
-            wf = self.orch.load_workflow()
-            if not wf or wf.workflow_id != req.workflow_id:
+            wf = self.orch.load_workflow(req.workflow_id)
+            if not wf:
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.WORKFLOW_NOT_FOUND, message="Workflow not found"))
             if wf.initiator_id != req.initiator_id:
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.UNAUTHORIZED_INITIATOR, message="Initiator mismatch"))
@@ -325,7 +338,7 @@ class OrchestratorAPI:
 
             # workflow state is authoritative — reload rather than trust the
             # runner's ad-hoc result dict.
-            wf = self.orch.load_workflow()
+            wf = self.orch.load_workflow(req.workflow_id)
             data = SubmitClarificationData(
                 workflow_id=wf.workflow_id,
                 current_phase=self._workflow_phase(wf),
@@ -337,8 +350,8 @@ class OrchestratorAPI:
 
     def submit_approval(self, req: SubmitApprovalRequest) -> APIResponse[SubmitApprovalData]:
         try:
-            wf = self.orch.load_workflow()
-            if not wf or wf.workflow_id != req.workflow_id:
+            wf = self.orch.load_workflow(req.workflow_id)
+            if not wf:
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.WORKFLOW_NOT_FOUND, message="Workflow not found"))
             if wf.initiator_id != req.initiator_id:
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.UNAUTHORIZED_INITIATOR, message="Initiator mismatch"))
@@ -363,7 +376,7 @@ class OrchestratorAPI:
             # workflow state is authoritative — reload rather than trust the
             # runner's ad-hoc result dict. This is what correctly surfaces
             # REVISION_REQUIRED on rejection instead of RUNNING.
-            wf = self.orch.load_workflow()
+            wf = self.orch.load_workflow(req.workflow_id)
             msg = "Approved and resumed" if req.approved else "Rejected: workflow requires revision"
             data = SubmitApprovalData(
                 workflow_id=wf.workflow_id,
@@ -377,13 +390,24 @@ class OrchestratorAPI:
 
     def resume_workflow(self, req: ResumeWorkflowRequest) -> APIResponse[ResumeWorkflowData]:
         try:
-            wf = self.orch.load_workflow()
-            if not wf or wf.workflow_id != req.workflow_id:
+            wf = self.orch.load_workflow(req.workflow_id)
+            if not wf:
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.WORKFLOW_NOT_FOUND, message="Workflow not found"))
             if wf.initiator_id != req.initiator_id:
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.UNAUTHORIZED_INITIATOR, message="Initiator mismatch"))
             if wf.status in (WorkflowStatus.COMPLETED, WorkflowStatus.FAILED, WorkflowStatus.CANCELLED):
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.INVALID_STATE_TRANSITION, message="Workflow is already terminal"))
+            if wf.status in (WorkflowStatus.WAITING_FOR_CLARIFICATION, WorkflowStatus.WAITING_FOR_APPROVAL):
+                # resume_workflow re-runs the agent from scratch, which would
+                # silently overwrite the outstanding pending_clarification/
+                # pending_approval with a new interaction id, orphaning
+                # whatever the client already has in hand. The correct way
+                # to move this workflow forward is submit_clarification/
+                # submit_approval, not resume.
+                return APIResponse(success=False, error=APIErrorDetail(
+                    code=ErrorCode.INVALID_STATE_TRANSITION,
+                    message="Workflow has a pending human-in-the-loop interaction; submit it instead of resuming",
+                ))
 
             try:
                 self.orch.run_workflow_graph(wf.workflow_id)
@@ -394,7 +418,7 @@ class OrchestratorAPI:
                     return self._orchestration_error(str(e), details={"reason": "missing_agent", "workflow_id": wf.workflow_id})
                 return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.INTERNAL_ORCHESTRATION_ERROR, message=str(e)))
 
-            wf = self.orch.load_workflow()
+            wf = self.orch.load_workflow(req.workflow_id)
             data = ResumeWorkflowData(
                 workflow_id=wf.workflow_id,
                 current_phase=self._workflow_phase(wf),
@@ -411,8 +435,8 @@ class OrchestratorAPI:
             # the same workflow_id must not interleave and lose an update.
             try:
                 with self.orch.store.transaction():
-                    wf = self.orch.load_workflow()
-                    if not wf or wf.workflow_id != req.workflow_id:
+                    wf = self.orch.load_workflow(req.workflow_id)
+                    if not wf:
                         return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.WORKFLOW_NOT_FOUND, message="Workflow not found"))
                     if wf.initiator_id != req.initiator_id:
                         return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.UNAUTHORIZED_INITIATOR, message="Initiator mismatch"))
