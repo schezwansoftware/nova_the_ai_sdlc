@@ -3,7 +3,7 @@ from typing import Dict, Any, Optional
 import uuid
 from pydantic import ValidationError
 
-from ai_sdlc.orchestration.state import StateStore, WorkflowState
+from ai_sdlc.orchestration.state import StateStore, WorkflowState, WorkflowStatus
 from ai_sdlc.agents.base import AgentRequest, AgentResult, AgentStatus
 from ai_sdlc.agents.registry import AgentRegistry
 
@@ -52,7 +52,7 @@ class Orchestrator:
         # Validate pending clarification
         if not wf.pending_clarification or wf.pending_clarification.get("question_id") != question_id:
             raise RuntimeError("invalid_or_stale_question_id")
-        if wf.status != "paused":
+        if wf.status != WorkflowStatus.WAITING_FOR_CLARIFICATION:
             raise RuntimeError("workflow_not_paused_for_clarification")
 
         # persist the answer into the clarification record
@@ -68,7 +68,7 @@ class Orchestrator:
 
         # clear pending clarification and set inputs for resume
         wf.pending_clarification = None
-        wf.status = "running"
+        wf.status = WorkflowStatus.RUNNING
         self.save_workflow(wf)
 
         # resume by invoking runner with merged inputs
@@ -86,7 +86,7 @@ class Orchestrator:
         # Validate pending approval
         if not wf.pending_approval or wf.pending_approval.get("approval_id") != approval_id:
             raise RuntimeError("invalid_or_stale_approval_id")
-        if wf.status != "waiting_for_approval":
+        if wf.status != WorkflowStatus.WAITING_FOR_APPROVAL:
             raise RuntimeError("workflow_not_waiting_for_approval")
 
         # persist approval decision
@@ -105,7 +105,7 @@ class Orchestrator:
         if decision == "approved":
             # clear pending and resume
             wf.pending_approval = None
-            wf.status = "running"
+            wf.status = WorkflowStatus.RUNNING
             self.save_workflow(wf)
             from ai_sdlc.orchestration.langgraph_runner import LangGraphRunner
             nodes = [{"id": "requirements", "type": "agent", "agent_id": "po"}]
@@ -114,7 +114,7 @@ class Orchestrator:
         else:
             # rejected — set explicit revision state and do not continue
             wf.pending_approval = {**wf.pending_approval, "decision": "rejected", "feedback": feedback}
-            wf.status = "revision_required"
+            wf.status = WorkflowStatus.REVISION_REQUIRED
             self.save_workflow(wf)
             self._emit({"event": "approval_rejected", "workflow_id": wf.workflow_id, "approval_id": approval_id, "feedback": feedback})
             return {"status": "rejected"}
@@ -183,7 +183,7 @@ class Orchestrator:
                     self._emit({"event": "agent_retry", "workflow_id": wf.workflow_id, "agent_id": agent_id, "attempt": attempts})
                     continue
                 else:
-                    wf.status = "failed"
+                    wf.status = WorkflowStatus.FAILED
                     self.save_workflow(wf)
                     self._emit({"event": "workflow_failed", "workflow_id": wf.workflow_id, "reason": "non_retryable_agent_error"})
                     return {"status": "failed", "error": str(e), "retryable": False}
@@ -197,7 +197,7 @@ class Orchestrator:
                     "error": str(e),
                     "retryable": False,
                 })
-                wf.status = "failed"
+                wf.status = WorkflowStatus.FAILED
                 self.save_workflow(wf)
                 self._emit({"event": "workflow_failed", "workflow_id": wf.workflow_id, "reason": "non_retryable_agent_error"})
                 return {"status": "failed", "error": str(e), "retryable": False}
@@ -220,7 +220,7 @@ class Orchestrator:
                 attempts += 1
                 wf.retry_count[agent_id] = attempts
                 if attempts >= self.max_attempts:
-                    wf.status = "failed"
+                    wf.status = WorkflowStatus.FAILED
                     self.save_workflow(wf)
                     self._emit({"event": "workflow_failed", "workflow_id": wf.workflow_id, "reason": "invalid_agent_output"})
                     return {"status": "failed", "error": "invalid_agent_output", "retryable": False}
@@ -244,7 +244,7 @@ class Orchestrator:
                 # mark stage complete
                 if wf.current_stage:
                     wf.stages[wf.current_stage] = "completed"
-                wf.status = "running"
+                wf.status = WorkflowStatus.RUNNING
                 wf.retry_count.pop(agent_id, None)
                 self.save_workflow(wf)
                 return {"status": "completed"}
@@ -260,7 +260,7 @@ class Orchestrator:
                     "required": True,
                 }
                 self.store.write_clarification(qid, question)
-                wf.status = "paused"
+                wf.status = WorkflowStatus.WAITING_FOR_CLARIFICATION
                 wf.pending_clarification = {
                     "question_id": qid,
                     "stage": wf.current_stage,
@@ -283,7 +283,7 @@ class Orchestrator:
                     "timestamp": None,
                 }
                 self.store.write_approval(aid, approval)
-                wf.status = "waiting_for_approval"
+                wf.status = WorkflowStatus.WAITING_FOR_APPROVAL
                 wf.pending_approval = {
                     "approval_id": aid,
                     "stage": wf.current_stage,
@@ -296,46 +296,18 @@ class Orchestrator:
 
             # Unknown or other statuses -> mark blocked/failed accordingly
             if result.status == AgentStatus.FAILED:
-                wf.status = "failed"
+                wf.status = WorkflowStatus.FAILED
                 self.save_workflow(wf)
                 self._emit({"event": "workflow_failed", "workflow_id": wf.workflow_id, "reason": "agent_failed"})
                 return {"status": "failed", "attempts": attempts}
 
             # Default fallback
-            wf.status = "running"
+            wf.status = WorkflowStatus.RUNNING
             self.save_workflow(wf)
             return {"status": "unknown_status", "result_status": str(result.status)}
 
         # If we exit the retry loop without returning, attempts were exhausted
-        wf.status = "failed"
+        wf.status = WorkflowStatus.FAILED
         self.save_workflow(wf)
         self._emit({"event": "workflow_failed", "workflow_id": wf.workflow_id, "reason": "retry_exhausted"})
         return {"status": "failed", "details": {"reason": "retry_exhausted"}}
-
-    def _handle_agent_failure(self, wf: WorkflowState, agent_id: str, request: AgentRequest, error: AgentExecutionError):
-        # Emit agent_failed and decide retry
-        self._emit({
-            "event": "agent_failed",
-            "workflow_id": wf.workflow_id,
-            "request_id": request.request_id,
-            "agent_id": agent_id,
-            "error": str(error),
-            "retryable": error.retryable,
-        })
-        if error.retryable:
-            self._increment_retry(wf, agent_id)
-            attempts = wf.retry_count.get(agent_id, 0)
-            if attempts >= self.max_attempts:
-                wf.status = "failed"
-                self.save_workflow(wf)
-                self._emit({"event": "workflow_failed", "workflow_id": wf.workflow_id, "reason": "retry_exhausted"})
-            else:
-                self.save_workflow(wf)
-        else:
-            wf.status = "failed"
-            self.save_workflow(wf)
-            self._emit({"event": "workflow_failed", "workflow_id": wf.workflow_id, "reason": "non_retryable_agent_error"})
-
-    def _increment_retry(self, wf: WorkflowState, agent_id: str):
-        wf.retry_count[agent_id] = wf.retry_count.get(agent_id, 0) + 1
-        self._emit({"event": "agent_retry", "workflow_id": wf.workflow_id, "agent_id": agent_id, "attempt": wf.retry_count[agent_id]})

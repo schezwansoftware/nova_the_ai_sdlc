@@ -118,6 +118,163 @@ def test_invoke_agent_needs_approval(tmp_path):
     assert "approval_requested" in audit
 
 
+def test_agent_failure_then_retry_then_success(tmp_path):
+    workspace, wf = make_workflow(tmp_path)
+    orch = Orchestrator(workspace)
+
+    result = AgentResult(request_id="r", workflow_id=wf.workflow_id, agent_id="dev", status=AgentStatus.COMPLETED)
+
+    def raise_fn(call_count):
+        if call_count == 1:
+            return AgentExecutionError("transient", retryable=True)
+        return None
+
+    agent = StubAgent(result=result, raise_exc=raise_fn)
+    orch.register_agent("dev", agent)
+
+    res = orch.invoke_agent_for_stage(wf, "dev")
+    assert res["status"] == "completed"
+    assert agent.calls == 2
+
+    wf2 = orch.load_workflow()
+    assert wf2.status == "running"
+    assert wf2.retry_count.get("dev", 0) == 0
+
+
+def test_non_retryable_failure_stops_after_one_attempt(tmp_path):
+    workspace, wf = make_workflow(tmp_path)
+    orch = Orchestrator(workspace)
+
+    agent = StubAgent(raise_exc=AgentExecutionError("permanent", retryable=False))
+    orch.register_agent("dev", agent)
+
+    res = orch.invoke_agent_for_stage(wf, "dev")
+    assert res["status"] == "failed"
+    assert agent.calls == 1
+
+    wf2 = orch.load_workflow()
+    assert wf2.status == "failed"
+
+
+def test_retry_never_exceeds_max_attempts(tmp_path):
+    workspace, wf = make_workflow(tmp_path)
+    orch = Orchestrator(workspace)
+
+    agent = StubAgent(raise_exc=lambda call_count: AgentExecutionError("always transient", retryable=True))
+    orch.register_agent("dev", agent)
+
+    res = orch.invoke_agent_for_stage(wf, "dev")
+    assert res["status"] == "failed"
+    # agent invoked at most max_attempts times, never more
+    assert agent.calls == orch.max_attempts
+
+    wf2 = orch.load_workflow()
+    assert wf2.status == "failed"
+
+
+def test_pending_clarification_and_question_id_survive_persistence(tmp_path):
+    workspace, wf = make_workflow(tmp_path)
+    orch = Orchestrator(workspace)
+
+    result = AgentResult(
+        request_id="r",
+        workflow_id=wf.workflow_id,
+        agent_id="po",
+        status=AgentStatus.NEEDS_CLARIFICATION,
+        questions=["Which fields?"],
+    )
+    orch.register_agent("po", StubAgent(result=result))
+
+    res = orch.invoke_agent_for_stage(wf, "po")
+    qid = res["question_id"]
+
+    # A brand new Orchestrator/StateStore instance must see the same state —
+    # proves it round-trips through disk, not just in-memory objects.
+    orch2 = Orchestrator(workspace)
+    wf2 = orch2.load_workflow()
+    assert wf2.pending_clarification is not None
+    assert wf2.pending_clarification["question_id"] == qid
+
+    record = orch2.store.read_clarification(qid)
+    assert record is not None
+    assert record["question_id"] == qid
+
+
+def test_clarification_answer_persists_on_disk(tmp_path):
+    workspace, wf = make_workflow(tmp_path)
+    orch = Orchestrator(workspace)
+
+    result = AgentResult(
+        request_id="r",
+        workflow_id=wf.workflow_id,
+        agent_id="po",
+        status=AgentStatus.NEEDS_CLARIFICATION,
+        questions=["Which fields?"],
+    )
+    orch.register_agent("po", StubAgent(result=result))
+
+    res = orch.invoke_agent_for_stage(wf, "po")
+    qid = res["question_id"]
+
+    orch.resume_workflow_after_clarification(wf.workflow_id, qid, "Only the selected fields")
+
+    orch2 = Orchestrator(workspace)
+    record = orch2.store.read_clarification(qid)
+    assert record["answer"] == "Only the selected fields"
+
+
+def test_approval_decision_and_feedback_persist_on_rejection(tmp_path):
+    workspace, wf = make_workflow(tmp_path)
+    orch = Orchestrator(workspace)
+
+    artifact = ArtifactRef(type="requirements", path=".ai-sdlc/requirements.json")
+    decision = AgentDecision(status="ready_for_approval", approval_required=True)
+    result = AgentResult(
+        request_id="r",
+        workflow_id=wf.workflow_id,
+        agent_id="po",
+        status=AgentStatus.NEEDS_APPROVAL,
+        artifact=artifact,
+        decision=decision,
+    )
+    orch.register_agent("po", StubAgent(result=result))
+
+    res = orch.invoke_agent_for_stage(wf, "po")
+    aid = res["approval_id"]
+
+    resume_res = orch.resume_workflow_after_approval(wf.workflow_id, aid, "rejected", feedback="needs more detail")
+    assert resume_res == {"status": "rejected"}
+
+    orch2 = Orchestrator(workspace)
+    record = orch2.store.read_approval(aid)
+    assert record["decision"] == "rejected"
+    assert record["feedback"] == "needs more detail"
+
+    wf2 = orch2.load_workflow()
+    assert wf2.status == "revision_required"
+
+
+def test_approval_invalid_id_is_rejected(tmp_path):
+    workspace, wf = make_workflow(tmp_path)
+    orch = Orchestrator(workspace)
+
+    artifact = ArtifactRef(type="requirements", path=".ai-sdlc/requirements.json")
+    decision = AgentDecision(status="ready_for_approval", approval_required=True)
+    result = AgentResult(
+        request_id="r",
+        workflow_id=wf.workflow_id,
+        agent_id="po",
+        status=AgentStatus.NEEDS_APPROVAL,
+        artifact=artifact,
+        decision=decision,
+    )
+    orch.register_agent("po", StubAgent(result=result))
+    orch.invoke_agent_for_stage(wf, "po")
+
+    with pytest.raises(RuntimeError):
+        orch.resume_workflow_after_approval(wf.workflow_id, "not-the-real-id", "approved")
+
+
 def test_agent_retry_and_exhaustion(tmp_path):
     workspace, wf = make_workflow(tmp_path)
     orch = Orchestrator(workspace)

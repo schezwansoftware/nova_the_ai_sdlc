@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import List, Dict, Any, Optional
 
 from ai_sdlc.orchestration.orchestrator import Orchestrator
-from ai_sdlc.orchestration.state import WorkflowState
+from ai_sdlc.orchestration.state import WorkflowState, WorkflowStatus
 
 
 class LangGraphRunner:
@@ -79,7 +79,7 @@ class LangGraphRunner:
 
         # all nodes completed
         self.wf.current_stage = None
-        self.wf.status = "completed"
+        self.wf.status = WorkflowStatus.COMPLETED
         self.orch.save_workflow(self.wf)
         self.orch._emit({"event": "workflow_completed", "workflow_id": self.wf.workflow_id})
         return {"status": "completed"}
@@ -104,7 +104,3 @@ class LangGraphRunner:
             # continue running remaining nodes
             return self.run()
         return res
-
-    def resume_after_approval(self, approval_id: str, decision: str, feedback: str | None = None) -> Dict[str, Any]:
-        # Delegate approval handling to orchestrator so validation and persistence are authoritative
-        return self.orch.resume_workflow_after_approval(self.wf.workflow_id, approval_id, decision, feedback)

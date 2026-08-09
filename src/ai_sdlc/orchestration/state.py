@@ -23,10 +23,20 @@ def utc_now_iso() -> str:
 
 
 class WorkflowStatus(str):
+    """Centralized internal workflow status vocabulary.
+
+    Values are the authoritative on-disk string representations; do not
+    change them without a migration, since they are persisted in
+    .ai-sdlc/workflow.json.
+    """
+
     RUNNING = "running"
+    WAITING_FOR_CLARIFICATION = "paused"
     WAITING_FOR_APPROVAL = "waiting_for_approval"
+    REVISION_REQUIRED = "revision_required"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class WorkflowState(BaseModel):
@@ -119,6 +129,13 @@ class StateStore:
             self._atomic_write_json(path, approval_record)
         return path
 
+    def read_approval(self, approval_id: str) -> Optional[Dict]:
+        path = self.approvals_dir / f"{approval_id}.json"
+        with self._locked(exclusive=False):
+            if not path.exists():
+                return None
+            return json.loads(path.read_text(encoding="utf-8"))
+
     def write_change_request(self, cr_id: str, cr_record: Dict) -> Path:
         path = self.changes_dir / f"{cr_id}.json"
         with self._locked(exclusive=True):
@@ -130,3 +147,10 @@ class StateStore:
         with self._locked(exclusive=True):
             self._atomic_write_json(path, question_record)
         return path
+
+    def read_clarification(self, question_id: str) -> Optional[Dict]:
+        path = self.clarifications_dir / f"{question_id}.json"
+        with self._locked(exclusive=False):
+            if not path.exists():
+                return None
+            return json.loads(path.read_text(encoding="utf-8"))

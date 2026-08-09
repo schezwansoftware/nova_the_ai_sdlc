@@ -67,6 +67,47 @@ def test_requirement_po_approval_and_resume(tmp_path):
     assert resume_res["status"] == "completed"
 
 
+def test_approval_acceptance_resumes_exactly_once_without_recursion(tmp_path):
+    workspace = prepare_workspace(tmp_path)
+    orch = Orchestrator(workspace)
+    wf = WorkflowState(workflow_id="wf6", current_stage="requirements", initiator_id="u1")
+    orch.store.write_workflow(wf)
+
+    class CountingApprovalAgent:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, request):
+            self.calls += 1
+            from ai_sdlc.agents.base import AgentResult, AgentStatus, ArtifactRef, AgentDecision
+            return AgentResult(
+                request_id=request.request_id,
+                workflow_id=request.workflow_id,
+                agent_id="po",
+                status=AgentStatus.NEEDS_APPROVAL,
+                artifact=ArtifactRef(type="requirements", path=".ai-sdlc/requirements.json"),
+                decision=AgentDecision(status="ready_for_approval", approval_required=True),
+            )
+
+    agent = CountingApprovalAgent()
+    orch.register_agent("po", agent)
+
+    wf_loaded = orch.load_workflow()
+    res = orch.invoke_agent_for_stage(wf_loaded, "po")
+    assert res["status"] == "needs_approval"
+    aid = res["approval_id"]
+    assert agent.calls == 1
+
+    # Approving must resume through the normal Runner path exactly once —
+    # no RecursionError — and the agent is invoked exactly once more for the
+    # resumed attempt (it happens to request approval again here, which is a
+    # legitimate terminal outcome for this stub, not a bug).
+    resume_res = orch.resume_workflow_after_approval(wf_loaded.workflow_id, aid, "approved")
+    assert agent.calls == 2
+    assert resume_res["status"] == "interrupted"
+    assert resume_res["type"] == "approval"
+
+
 def test_retryable_failure_then_success(tmp_path):
     # We'll create a temporary agent that raises a retryable error first, then succeeds.
     workspace = prepare_workspace(tmp_path)
