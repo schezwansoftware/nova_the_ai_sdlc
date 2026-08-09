@@ -2,13 +2,25 @@ from __future__ import annotations
 from typing import Optional, Dict, Any, Generic, TypeVar
 from datetime import datetime
 from enum import Enum
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from uuid import uuid4
 
 from ai_sdlc.orchestration.orchestrator import Orchestrator
-from ai_sdlc.orchestration.state import WorkflowState, WorkflowStatus, utc_now
+from ai_sdlc.orchestration.state import WorkflowLockTimeoutError, WorkflowState, WorkflowStatus, utc_now
 
 T = TypeVar("T")
+
+
+class StrictModel(BaseModel):
+    """Base for all public API request/response models.
+
+    extra="forbid" makes the API boundary strict: a client-supplied field
+    that doesn't match the declared schema is rejected with a 400/
+    ValidationError instead of being silently dropped (the same failure
+    mode that let raw_requirement/project_context go missing before).
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class WorkflowPhase(str, Enum):
@@ -46,27 +58,27 @@ class ErrorCode(str, Enum):
     LOCK_ACQUISITION_FAILED = "LOCK_ACQUISITION_FAILED"
 
 
-class APIErrorDetail(BaseModel):
+class APIErrorDetail(StrictModel):
     code: ErrorCode
     message: str
     details: Optional[Dict[str, Any]] = None
     timestamp: datetime = Field(default_factory=utc_now)
 
 
-class APIResponse(BaseModel, Generic[T]):
+class APIResponse(StrictModel, Generic[T]):
     api_version: str = "v1"
     success: bool
     data: Optional[T] = None
     error: Optional[APIErrorDetail] = None
 
 
-class StartWorkflowRequest(BaseModel):
+class StartWorkflowRequest(StrictModel):
     initiator_id: str = Field(...)
     raw_requirement: str = Field(..., min_length=10)
     project_context: Dict[str, Any] = Field(default_factory=dict)
 
 
-class StartWorkflowData(BaseModel):
+class StartWorkflowData(StrictModel):
     workflow_id: str
     initiator_id: str
     current_phase: WorkflowPhase
@@ -74,18 +86,18 @@ class StartWorkflowData(BaseModel):
     created_at: datetime
 
 
-class GetWorkflowStatusRequest(BaseModel):
+class GetWorkflowStatusRequest(StrictModel):
     workflow_id: str
 
 
-class PendingAction(BaseModel):
+class PendingAction(StrictModel):
     action_type: str
     prompt_message: str
     target_phase: WorkflowPhase
     payload_artifact_path: Optional[str] = None
 
 
-class WorkflowStatusData(BaseModel):
+class WorkflowStatusData(StrictModel):
     workflow_id: str
     initiator_id: str
     current_phase: WorkflowPhase
@@ -95,21 +107,21 @@ class WorkflowStatusData(BaseModel):
     artifacts: Dict[str, str] = Field(default_factory=dict)
 
 
-class SubmitClarificationRequest(BaseModel):
+class SubmitClarificationRequest(StrictModel):
     workflow_id: str
     initiator_id: str
     question_id: str = Field(..., min_length=1)
     response_text: str = Field(..., min_length=1)
 
 
-class SubmitClarificationData(BaseModel):
+class SubmitClarificationData(StrictModel):
     workflow_id: str
     current_phase: WorkflowPhase
     status: WorkflowStatusType
     message: str = Field(default="Clarification accepted. Workflow resuming.")
 
 
-class SubmitApprovalRequest(BaseModel):
+class SubmitApprovalRequest(StrictModel):
     workflow_id: str
     initiator_id: str
     approval_id: str = Field(..., min_length=1)
@@ -117,31 +129,31 @@ class SubmitApprovalRequest(BaseModel):
     feedback: Optional[str] = None
 
 
-class SubmitApprovalData(BaseModel):
+class SubmitApprovalData(StrictModel):
     workflow_id: str
     current_phase: WorkflowPhase
     status: WorkflowStatusType
     message: str
 
 
-class ResumeWorkflowRequest(BaseModel):
+class ResumeWorkflowRequest(StrictModel):
     workflow_id: str
     initiator_id: str
 
 
-class ResumeWorkflowData(BaseModel):
+class ResumeWorkflowData(StrictModel):
     workflow_id: str
     current_phase: WorkflowPhase
     status: WorkflowStatusType
 
 
-class CancelWorkflowRequest(BaseModel):
+class CancelWorkflowRequest(StrictModel):
     workflow_id: str
     initiator_id: str
     reason: str
 
 
-class CancelWorkflowData(BaseModel):
+class CancelWorkflowData(StrictModel):
     workflow_id: str
     status: WorkflowStatusType = WorkflowStatusType.CANCELLED
     cancelled_at: datetime
@@ -231,6 +243,8 @@ class OrchestratorAPI:
             # execute initial node via internal graph runner
             try:
                 self.orch.run_workflow_graph(wf.workflow_id)
+            except WorkflowLockTimeoutError as e:
+                return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.LOCK_ACQUISITION_FAILED, message=str(e)))
             except Exception as e:
                 if self._is_missing_agent_error(e):
                     return self._orchestration_error(
@@ -302,6 +316,8 @@ class OrchestratorAPI:
             # resume via orchestrator
             try:
                 self.orch.resume_workflow_after_clarification(wf.workflow_id, question_id=req.question_id, answer=req.response_text)
+            except WorkflowLockTimeoutError as e:
+                return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.LOCK_ACQUISITION_FAILED, message=str(e)))
             except Exception as e:
                 if self._is_missing_agent_error(e):
                     return self._orchestration_error(str(e), details={"reason": "missing_agent", "workflow_id": wf.workflow_id})
@@ -337,6 +353,8 @@ class OrchestratorAPI:
             decision = "approved" if req.approved else "rejected"
             try:
                 self.orch.resume_workflow_after_approval(wf.workflow_id, approval_id=req.approval_id, decision=decision, feedback=req.feedback)
+            except WorkflowLockTimeoutError as e:
+                return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.LOCK_ACQUISITION_FAILED, message=str(e)))
             except Exception as e:
                 if self._is_missing_agent_error(e):
                     return self._orchestration_error(str(e), details={"reason": "missing_agent", "workflow_id": wf.workflow_id})
@@ -369,6 +387,8 @@ class OrchestratorAPI:
 
             try:
                 self.orch.run_workflow_graph(wf.workflow_id)
+            except WorkflowLockTimeoutError as e:
+                return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.LOCK_ACQUISITION_FAILED, message=str(e)))
             except Exception as e:
                 if self._is_missing_agent_error(e):
                     return self._orchestration_error(str(e), details={"reason": "missing_agent", "workflow_id": wf.workflow_id})
@@ -386,17 +406,24 @@ class OrchestratorAPI:
 
     def cancel_workflow(self, req: CancelWorkflowRequest) -> APIResponse[CancelWorkflowData]:
         try:
-            wf = self.orch.load_workflow()
-            if not wf or wf.workflow_id != req.workflow_id:
-                return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.WORKFLOW_NOT_FOUND, message="Workflow not found"))
-            if wf.initiator_id != req.initiator_id:
-                return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.UNAUTHORIZED_INITIATOR, message="Initiator mismatch"))
-            if wf.status in (WorkflowStatus.COMPLETED, WorkflowStatus.FAILED, WorkflowStatus.CANCELLED):
-                return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.INVALID_STATE_TRANSITION, message="Workflow is already terminal"))
+            # The full check-then-mutate sequence must hold the lock: cancel
+            # racing submit_clarification/submit_approval/resume_workflow on
+            # the same workflow_id must not interleave and lose an update.
+            try:
+                with self.orch.store.transaction():
+                    wf = self.orch.load_workflow()
+                    if not wf or wf.workflow_id != req.workflow_id:
+                        return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.WORKFLOW_NOT_FOUND, message="Workflow not found"))
+                    if wf.initiator_id != req.initiator_id:
+                        return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.UNAUTHORIZED_INITIATOR, message="Initiator mismatch"))
+                    if wf.status in (WorkflowStatus.COMPLETED, WorkflowStatus.FAILED, WorkflowStatus.CANCELLED):
+                        return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.INVALID_STATE_TRANSITION, message="Workflow is already terminal"))
 
-            wf.status = WorkflowStatus.CANCELLED
-            self.orch.save_workflow(wf)
-            data = CancelWorkflowData(workflow_id=wf.workflow_id, cancelled_at=utc_now())
-            return APIResponse(success=True, data=data)
+                    wf.status = WorkflowStatus.CANCELLED
+                    self.orch.save_workflow(wf)
+                    data = CancelWorkflowData(workflow_id=wf.workflow_id, cancelled_at=utc_now())
+                    return APIResponse(success=True, data=data)
+            except WorkflowLockTimeoutError as e:
+                return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.LOCK_ACQUISITION_FAILED, message=str(e)))
         except Exception as e:
             return APIResponse(success=False, error=APIErrorDetail(code=ErrorCode.INTERNAL_ORCHESTRATION_ERROR, message=str(e)))

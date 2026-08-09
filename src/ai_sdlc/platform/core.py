@@ -1,6 +1,5 @@
 from __future__ import annotations
 from ai_sdlc.orchestration.api import OrchestratorAPI
-from ai_sdlc.orchestration.state import StateStore
 
 
 class CorePlatform:
@@ -8,7 +7,6 @@ class CorePlatform:
 
     def __init__(self, workspace: str):
         self.workspace = workspace
-        self.state_engine = StateStore(workspace)
         self.orchestrator_api = OrchestratorAPI(workspace)
 
     def start_workflow(self, request):

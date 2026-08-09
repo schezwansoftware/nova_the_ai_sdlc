@@ -77,6 +77,93 @@ def test_state_store_handles_concurrent_writes(tmp_path: Path):
     assert loaded.current_stage == "requirements"
 
 
+def test_state_store_transaction_prevents_lost_updates(tmp_path: Path):
+    """Deterministic proof that transaction() makes a compound
+    read-modify-write atomic: without it, concurrent increments would race
+    and lose updates; with it, N increments always yield exactly N."""
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    store = StateStore(workspace)
+    wf = WorkflowState(workflow_id="wf-race", current_stage="requirements")
+    store.write_workflow(wf)
+
+    def bump(_):
+        with store.transaction():
+            current = store.read_workflow()
+            current.retry_count["counter"] = current.retry_count.get("counter", 0) + 1
+            store.write_workflow(current)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(bump, range(50)))
+
+    final = store.read_workflow()
+    assert final.retry_count["counter"] == 50
+
+
+def test_http_api_concurrent_approval_and_cancel_do_not_corrupt_state(tmp_path: Path):
+    workspace = prepare_workspace_with_po(tmp_path)
+    store = StateStore(workspace)
+    wf = WorkflowState(
+        workflow_id="wf-race-http",
+        current_stage="requirements",
+        initiator_id="u9",
+        status="waiting_for_approval",
+        pending_approval={"approval_id": "approval-race", "stage": "requirements", "artifact": {}, "inputs": {}},
+    )
+    store.write_workflow(wf)
+
+    server, thread = _start_server(workspace)
+    results = {}
+    barrier = threading.Barrier(2)
+
+    def do_approve():
+        barrier.wait(timeout=5)
+        results["approve"] = _http_request(server, "POST", "/v1/workflows/wf-race-http/approvals", {
+            "initiator_id": "u9",
+            "approval_id": "approval-race",
+            "approved": True,
+            "feedback": "looks good",
+        })
+
+    def do_cancel():
+        barrier.wait(timeout=5)
+        results["cancel"] = _http_request(server, "POST", "/v1/workflows/wf-race-http/cancel", {
+            "initiator_id": "u9",
+            "reason": "changed my mind",
+        })
+
+    try:
+        t1 = threading.Thread(target=do_approve)
+        t2 = threading.Thread(target=do_cancel)
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        assert "approve" in results and "cancel" in results
+        approve_status, approve_body = results["approve"]
+        cancel_status, cancel_body = results["cancel"]
+
+        # Neither request may crash the server or return malformed output.
+        assert approve_status in (200, 409, 500, 503)
+        assert cancel_status in (200, 409, 500, 503)
+
+        # workflow.json must remain readable and valid — not torn/corrupted
+        # by the race.
+        final = store.read_workflow()
+        assert final is not None
+        assert final.status in ("cancelled", "running", "completed", "waiting_for_approval")
+
+        # The lock must serialize the two compound operations: exactly one
+        # of the racing requests actually changes workflow state, the other
+        # is cleanly rejected (never both applied, never both silently lost).
+        successes = [r for r in (approve_body, cancel_body) if r.get("success")]
+        assert len(successes) == 1
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_platform_http_api_start_and_get_status(tmp_path: Path):
     workspace = prepare_workspace_with_po(tmp_path)
     server, thread = _start_server(workspace)
@@ -213,6 +300,246 @@ def test_platform_http_api_reports_conflict_for_invalid_state_transition(tmp_pat
         assert status == 409
         assert body["success"] is False
         assert body["error"]["code"] == "INVALID_STATE_TRANSITION"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_platform_http_api_cancel_success(tmp_path: Path):
+    workspace = prepare_workspace_with_po(tmp_path)
+    store = StateStore(workspace)
+    wf = WorkflowState(workflow_id="wf-cancel-ok", current_stage="requirements", initiator_id="u1", status="running")
+    store.write_workflow(wf)
+
+    server, thread = _start_server(workspace)
+    try:
+        status, body = _http_request(server, "POST", "/v1/workflows/wf-cancel-ok/cancel", {
+            "initiator_id": "u1",
+            "reason": "no longer needed",
+        })
+        assert status == 200
+        assert body["success"] is True
+        assert body["data"]["status"] == "CANCELLED"
+
+        status, body = _http_request(server, "GET", "/v1/workflows/wf-cancel-ok")
+        assert status == 200
+        assert body["data"]["status"] == "CANCELLED"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_platform_http_api_cancel_while_waiting_for_approval(tmp_path: Path):
+    workspace = prepare_workspace_with_po(tmp_path)
+    store = StateStore(workspace)
+    wf = WorkflowState(
+        workflow_id="wf-cancel-pending",
+        current_stage="requirements",
+        initiator_id="u2",
+        status="waiting_for_approval",
+        pending_approval={"approval_id": "approval-pending", "stage": "requirements", "artifact": {}, "inputs": {}},
+    )
+    store.write_workflow(wf)
+
+    server, thread = _start_server(workspace)
+    try:
+        status, body = _http_request(server, "POST", "/v1/workflows/wf-cancel-pending/cancel", {
+            "initiator_id": "u2",
+            "reason": "abandoning this one",
+        })
+        assert status == 200
+        assert body["success"] is True
+        assert body["data"]["status"] == "CANCELLED"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_platform_http_api_cancel_already_terminal_is_conflict(tmp_path: Path):
+    workspace = prepare_workspace_with_po(tmp_path)
+    store = StateStore(workspace)
+    wf = WorkflowState(workflow_id="wf-cancel-twice", current_stage="requirements", initiator_id="u3", status="cancelled")
+    store.write_workflow(wf)
+
+    server, thread = _start_server(workspace)
+    try:
+        status, body = _http_request(server, "POST", "/v1/workflows/wf-cancel-twice/cancel", {
+            "initiator_id": "u3",
+            "reason": "again",
+        })
+        assert status == 409
+        assert body["success"] is False
+        assert body["error"]["code"] == "INVALID_STATE_TRANSITION"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_platform_http_api_cancel_unauthorized_initiator(tmp_path: Path):
+    workspace = prepare_workspace_with_po(tmp_path)
+    store = StateStore(workspace)
+    wf = WorkflowState(workflow_id="wf-cancel-unauth", current_stage="requirements", initiator_id="owner", status="running")
+    store.write_workflow(wf)
+
+    server, thread = _start_server(workspace)
+    try:
+        status, body = _http_request(server, "POST", "/v1/workflows/wf-cancel-unauth/cancel", {
+            "initiator_id": "someone-else",
+            "reason": "not mine to cancel",
+        })
+        assert status == 403
+        assert body["success"] is False
+        assert body["error"]["code"] == "UNAUTHORIZED_INITIATOR"
+
+        # workflow must be untouched by the rejected attempt
+        still_running = store.read_workflow()
+        assert still_running.status == "running"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_platform_http_api_cancel_reports_not_found(tmp_path: Path):
+    workspace = prepare_workspace_with_po(tmp_path)
+    server, thread = _start_server(workspace)
+    try:
+        status, body = _http_request(server, "POST", "/v1/workflows/does-not-exist/cancel", {
+            "initiator_id": "u1",
+            "reason": "n/a",
+        })
+        assert status == 404
+        assert body["success"] is False
+        assert body["error"]["code"] == "WORKFLOW_NOT_FOUND"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_platform_http_api_submit_clarification_wrong_question_id(tmp_path: Path):
+    workspace = prepare_workspace_with_po(tmp_path)
+    store = StateStore(workspace)
+    wf = WorkflowState(
+        workflow_id="wf-clar-wrong",
+        current_stage="requirements",
+        initiator_id="u5",
+        status="paused",
+        pending_clarification={"question_id": "q-real", "stage": "requirements", "question": "Which fields?", "inputs": {}},
+    )
+    store.write_workflow(wf)
+
+    server, thread = _start_server(workspace)
+    try:
+        status, body = _http_request(server, "POST", "/v1/workflows/wf-clar-wrong/clarifications", {
+            "initiator_id": "u5",
+            "question_id": "q-not-the-real-one",
+            "response_text": "Yes use CSV",
+        })
+        assert status in (400, 409)
+        assert body["success"] is False
+
+        # workflow must still be paused, waiting on the real question id
+        untouched = store.read_workflow()
+        assert untouched.status == "paused"
+        assert untouched.pending_clarification["question_id"] == "q-real"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_platform_http_api_submit_clarification_stale_id_after_consumed(tmp_path: Path):
+    workspace = prepare_workspace_with_po(tmp_path)
+    store = StateStore(workspace)
+    wf = WorkflowState(
+        workflow_id="wf-clar-stale",
+        current_stage="requirements",
+        initiator_id="u6",
+        status="paused",
+        pending_clarification={"question_id": "q-once", "stage": "requirements", "question": "Which fields?", "inputs": {}},
+    )
+    store.write_workflow(wf)
+
+    server, thread = _start_server(workspace)
+    try:
+        status, body = _http_request(server, "POST", "/v1/workflows/wf-clar-stale/clarifications", {
+            "initiator_id": "u6",
+            "question_id": "q-once",
+            "response_text": "Yes use CSV",
+        })
+        assert status == 200
+        assert body["success"] is True
+
+        # re-submitting the now-consumed id must be rejected, not re-applied
+        status, body = _http_request(server, "POST", "/v1/workflows/wf-clar-stale/clarifications", {
+            "initiator_id": "u6",
+            "question_id": "q-once",
+            "response_text": "again",
+        })
+        assert status in (400, 409)
+        assert body["success"] is False
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_platform_http_api_submit_approval_wrong_approval_id(tmp_path: Path):
+    workspace = prepare_workspace_with_po(tmp_path)
+    store = StateStore(workspace)
+    wf = WorkflowState(
+        workflow_id="wf-appr-wrong",
+        current_stage="requirements",
+        initiator_id="u7",
+        status="waiting_for_approval",
+        pending_approval={"approval_id": "approval-real", "stage": "requirements", "artifact": {}, "inputs": {}},
+    )
+    store.write_workflow(wf)
+
+    server, thread = _start_server(workspace)
+    try:
+        status, body = _http_request(server, "POST", "/v1/workflows/wf-appr-wrong/approvals", {
+            "initiator_id": "u7",
+            "approval_id": "approval-not-the-real-one",
+            "approved": True,
+        })
+        assert status in (400, 409)
+        assert body["success"] is False
+
+        untouched = store.read_workflow()
+        assert untouched.status == "waiting_for_approval"
+        assert untouched.pending_approval["approval_id"] == "approval-real"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_platform_http_api_submit_approval_rejected_reports_revision_required(tmp_path: Path):
+    workspace = prepare_workspace_with_po(tmp_path)
+    store = StateStore(workspace)
+    wf = WorkflowState(
+        workflow_id="wf-appr-reject",
+        current_stage="requirements",
+        initiator_id="u8",
+        status="waiting_for_approval",
+        pending_approval={"approval_id": "approval-reject", "stage": "requirements", "artifact": {}, "inputs": {}},
+    )
+    store.write_workflow(wf)
+
+    server, thread = _start_server(workspace)
+    try:
+        status, body = _http_request(server, "POST", "/v1/workflows/wf-appr-reject/approvals", {
+            "initiator_id": "u8",
+            "approval_id": "approval-reject",
+            "approved": False,
+            "feedback": "needs more detail",
+        })
+        assert status == 200
+        assert body["success"] is True
+        assert body["data"]["status"] == "REVISION_REQUIRED"
+
+        # the rejection must be visible on subsequent status polls too, not
+        # just in the submit response.
+        status, body = _http_request(server, "GET", "/v1/workflows/wf-appr-reject")
+        assert status == 200
+        assert body["data"]["status"] == "REVISION_REQUIRED"
     finally:
         server.shutdown()
         thread.join(timeout=5)

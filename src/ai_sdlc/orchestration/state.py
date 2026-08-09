@@ -3,6 +3,7 @@ import contextlib
 import json
 import os
 import tempfile
+import threading
 from pathlib import Path
 from typing import Dict, Optional, Any
 
@@ -12,6 +13,13 @@ except ImportError:  # pragma: no cover
     fcntl = None
 from datetime import datetime, timezone
 from pydantic import BaseModel, Field
+
+DEFAULT_LOCK_TIMEOUT = 5.0
+
+
+class WorkflowLockTimeoutError(Exception):
+    """Raised when a compound read-modify-write transaction cannot acquire
+    the in-process workflow lock within the timeout."""
 
 
 def utc_now() -> datetime:
@@ -60,6 +68,13 @@ class StateStore:
 
     This class validates JSON state using the WorkflowState model and
     protects workflow persistence with file locks plus atomic temporary writes.
+
+    The fcntl-based `_locked()` lock below only protects each individual file
+    operation (a single read or a single write) from corruption. It does NOT
+    make a compound "load -> mutate -> save" sequence atomic — two such
+    sequences can still interleave and silently lose one side's update. Code
+    performing a compound read-modify-write against the workflow must hold
+    `transaction()` for the full sequence.
     """
 
     def __init__(self, workspace: Path | str):
@@ -79,6 +94,30 @@ class StateStore:
         self.changes_dir.mkdir(parents=True, exist_ok=True)
         self.clarifications_dir = self.state_dir / "clarifications"
         self.clarifications_dir.mkdir(parents=True, exist_ok=True)
+
+        # In-process mutex guarding compound read-modify-write sequences.
+        # This is scoped to this StateStore instance, which is sufficient
+        # because the platform HTTP server (ThreadedHTTPServer) runs a
+        # single process with one shared CorePlatform/StateStore instance
+        # across all request threads.
+        self._mutex = threading.Lock()
+
+    @contextlib.contextmanager
+    def transaction(self, timeout: float = DEFAULT_LOCK_TIMEOUT):
+        """Serialize a compound read-modify-write sequence against the
+        workflow (load_workflow() -> mutate -> save_workflow()) so concurrent
+        callers can't interleave and lose each other's updates.
+
+        Raises WorkflowLockTimeoutError if the lock isn't acquired within
+        `timeout` seconds, instead of blocking forever.
+        """
+        acquired = self._mutex.acquire(timeout=timeout)
+        if not acquired:
+            raise WorkflowLockTimeoutError(f"Could not acquire workflow lock within {timeout}s")
+        try:
+            yield
+        finally:
+            self._mutex.release()
 
     @contextlib.contextmanager
     def _locked(self, exclusive: bool = True):
