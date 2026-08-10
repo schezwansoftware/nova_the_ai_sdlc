@@ -46,7 +46,7 @@ Update/remove items as they're resolved.
 
 ## Craft (PO Agent) — clarification-resume bug found by Pixel's CLI integration tests (2026-08-10)
 
-- [ ] **`POAgent._effective_text` can never actually resolve a
+- [x] **`POAgent._effective_text` can never actually resolve a
       clarification requested on the workflow's first node when driven
       through the real public API.** `_effective_text` prefers
       `inputs["requirement_text"]` over `inputs["clarification_answer"]`
@@ -78,6 +78,31 @@ Update/remove items as they're resolved.
       Architecture node (mirroring `test_workflow_full_sequence.py`)
       instead of the real PO ambiguity path — see
       `tests/test_cli_contract.py::clarification_stub_server`.
+
+  **Resolved** (branch `agents/craft-po-clarification-fix`,
+  `src/ai_sdlc/agents/po/po_agent.py::_effective_text`): flipped the
+  precedence to prefer `clarification_answer` over `requirement_text`
+  whenever the answer is present, instead of the reverse. Safe because PO
+  is only ever invoked once-then-resumed in this graph (it never runs
+  again once the workflow advances past `requirements`), so a present
+  `clarification_answer` on a PO request unambiguously means "this is my
+  own resume." Fixed at the Craft layer only — Orion's `wf.inputs`
+  accumulation behavior (never clearing `requirement_text` on resume) was
+  left as-is; the precedence flip was the smaller, correct fix without
+  also needing to change Orion's cumulative-inputs design. Verified two
+  ways: a unit test resuming `POAgent.execute()` with both
+  `requirement_text` (still the original ambiguous string) and
+  `clarification_answer` present simultaneously (`test_po_agent.py::
+  test_clarification_answer_resolves_ambiguity_even_though_requirement_text_is_still_present`),
+  and an end-to-end test through the real public API with no stub agents
+  (`test_workflow_full_sequence.py::
+  test_clarification_on_first_node_resolves_instead_of_looping_forever`),
+  plus a manual re-run of the exact repro above (now completes instead of
+  re-asking). Pixel's CLI still uses a stub agent for its own
+  clarification-flow test (`clarification_stub_server` above) rather than
+  the real PO path — that's an intentional, still-fine CLI test-isolation
+  choice (proving the CLI's `answer` mechanics work against any
+  well-behaved node), not a sign this fix is incomplete.
 
 ## Orion / Core — UX_DESIGN wiring follow-up (this pass)
 
