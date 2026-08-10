@@ -223,7 +223,10 @@ def test_platform_http_api_start_with_requirement_clarification(tmp_path: Path):
     try:
         status, body = _http_request(server, "POST", "/v1/workflows", {
             "initiator_id": "u1",
-            "raw_requirement": "Please clarify which fields are required.",
+            # Genuinely ambiguous (contains explicit vagueness markers) so
+            # the real POAgent's ambiguity heuristic asks for clarification,
+            # rather than relying on stub keyword-matching.
+            "raw_requirement": "TBD, not sure yet, figure out later.",
             "project_context": {"repository_name": "order-service"},
         })
         assert status == 200
@@ -275,6 +278,12 @@ def test_platform_http_api_submit_approval_and_resume(tmp_path: Path):
         current_stage="requirements",
         initiator_id="u3",
         status="waiting_for_approval",
+        # In the real flow this would already be populated by start_workflow
+        # (see OrchestratorAPI.start_workflow persisting raw_requirement onto
+        # wf.inputs); the resume-after-approval path re-invokes the PO Agent
+        # from wf.inputs with no fresh caller-supplied text, so it must
+        # already be present here for the real POAgent to complete on resume.
+        inputs={"requirement_text": "Add export functionality for customers."},
         pending_approval={"approval_id": "approval-approve", "stage": "requirements", "artifact": {}, "inputs": {}},
     )
     store.write_workflow(wf)

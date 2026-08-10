@@ -42,15 +42,27 @@ def test_po_agent_discovery_and_invoke(tmp_path):
     wf_after = orch.load_workflow()
     assert wf_after.stages.get("requirements") == "completed"
 
-    # Invoke PO agent with text that triggers clarification
+    # Invoke PO agent with text that triggers clarification. The real
+    # POAgent's ambiguity heuristics (short text / vagueness markers) are
+    # exercised directly in tests/test_po_agent.py; here we use the
+    # documented `force` test hook to deterministically exercise the
+    # Orchestrator's needs_clarification handling path regardless of the
+    # real agent's heuristics.
     wf_after.current_stage = "requirements"
     store.write_workflow(wf_after)
-    res2 = orch.invoke_agent_for_stage(wf_after, "po", inputs={"requirement_text": "Needs clarify"})
+    res2 = orch.invoke_agent_for_stage(
+        wf_after, "po", inputs={"requirement_text": "Add export feature", "force": "clarify"}
+    )
     assert res2["status"] == "needs_clarification"
 
-    # Invoke PO agent with text that triggers approval
+    # Invoke PO agent with the documented `force` hook that triggers
+    # approval. The real POAgent has no approval-gating logic of its own
+    # (Orion owns approval workflow progression); this hook exists purely
+    # to exercise the Orchestrator's existing needs_approval handling path.
     wf_latest = orch.load_workflow()
     wf_latest.current_stage = "requirements"
     store.write_workflow(wf_latest)
-    res3 = orch.invoke_agent_for_stage(wf_latest, "po", inputs={"requirement_text": "Please approve"})
+    res3 = orch.invoke_agent_for_stage(
+        wf_latest, "po", inputs={"requirement_text": "Add export feature", "force": "approval"}
+    )
     assert res3["status"] == "needs_approval"

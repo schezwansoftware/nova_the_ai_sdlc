@@ -29,7 +29,12 @@ def test_requirement_po_completed(tmp_path):
     orch = Orchestrator(workspace)
     orch.store.write_workflow(wf)
 
-    res = orch.run_workflow_graph(wf.workflow_id)
+    # The real POAgent needs concrete, non-ambiguous requirement text to
+    # complete (see tests/test_po_agent.py for its ambiguity heuristics).
+    res = orch.run_workflow_graph(
+        wf.workflow_id,
+        inputs={"requirement_text": "Add a CSV export button to the reports page for finance users."},
+    )
     assert res["status"] == "completed"
 
 
@@ -39,10 +44,12 @@ def test_requirement_po_clarify_and_resume(tmp_path):
     orch = Orchestrator(workspace)
     orch.store.write_workflow(wf)
 
-    # invoke with clarify by passing special input (we call run_workflow_graph but po reads inputs from workflow?)
-    # For this test, we will directly invoke the PO with clarify via invoke_agent_for_stage
+    # Use the PO Agent's documented `force` test hook to deterministically
+    # exercise the needs_clarification path via invoke_agent_for_stage.
     wf_loaded = orch.load_workflow()
-    res = orch.invoke_agent_for_stage(wf_loaded, "po", inputs={"requirement_text": "clarify this"})
+    res = orch.invoke_agent_for_stage(
+        wf_loaded, "po", inputs={"requirement_text": "Add export feature", "force": "clarify"}
+    )
     assert res["status"] == "needs_clarification"
     qid = res["question_id"]
 
@@ -57,8 +64,20 @@ def test_requirement_po_approval_and_resume(tmp_path):
     orch = Orchestrator(workspace)
     orch.store.write_workflow(wf)
 
+    # Use the PO Agent's documented `force` test hook to deterministically
+    # exercise the needs_approval path via invoke_agent_for_stage. The real
+    # POAgent has no approval-gating logic of its own; Orion owns approval
+    # workflow progression.
+    #
+    # Persist requirement_text onto wf.inputs itself (mirroring what
+    # OrchestratorAPI.start_workflow does in the real flow) so it survives
+    # into the resume-after-approval call below: LangGraphRunner.run(),
+    # invoked by resume_workflow_after_approval, re-invokes the same stage
+    # with no fresh caller-supplied inputs, relying entirely on wf.inputs.
     wf_loaded = orch.load_workflow()
-    res = orch.invoke_agent_for_stage(wf_loaded, "po", inputs={"requirement_text": "please approve this"})
+    wf_loaded.inputs = {"requirement_text": "Add export feature"}
+    orch.save_workflow(wf_loaded)
+    res = orch.invoke_agent_for_stage(wf_loaded, "po", inputs={"force": "approval"})
     assert res["status"] == "needs_approval"
     aid = res["approval_id"]
 
