@@ -197,6 +197,105 @@ def test_clarification_interrupt_answer_resumes_to_completion(clarification_stub
     assert "Workflow completed" in answer_result.output
 
 
+def test_interactive_start_resolves_clarification_inline(
+    clarification_stub_server, cli_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In a real terminal session, `start` should prompt for the answer
+    itself and drive the workflow to completion in one process -- no
+    separate `ai-sdlc answer` invocation needed (docs §12.1)."""
+    workspace, port = clarification_stub_server
+    _write_config(cli_config_dir, workspace, port=port)
+    monkeypatch.setattr("ai_sdlc.cli.handlers._is_interactive_session", lambda: True)
+
+    result = runner.invoke(
+        app,
+        ["start", "--prompt", _REQUIREMENT_TEXT],
+        input="Use a modular monolith with a dedicated cache layer.\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Clarification requested" in result.output
+    assert "Your answer" in result.output
+    assert "Workflow completed" in result.output
+
+
+def test_interactive_start_resolves_approval_approve_inline(
+    approval_stub_server, cli_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, port = approval_stub_server
+    _write_config(cli_config_dir, workspace, port=port)
+    monkeypatch.setattr("ai_sdlc.cli.handlers._is_interactive_session", lambda: True)
+
+    result = runner.invoke(app, ["start", "--prompt", _REQUIREMENT_TEXT], input="y\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Approval requested" in result.output
+    assert "Workflow completed" in result.output
+
+
+def test_interactive_start_resolves_approval_reject_inline_and_halts(
+    approval_stub_server, cli_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, port = approval_stub_server
+    _write_config(cli_config_dir, workspace, port=port)
+    monkeypatch.setattr("ai_sdlc.cli.handlers._is_interactive_session", lambda: True)
+
+    result = runner.invoke(
+        app,
+        ["start", "--prompt", _REQUIREMENT_TEXT],
+        input="n\nNeeds another pass on accessibility.\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Approval requested" in result.output
+    assert "requires revision" in result.output
+    assert "needs revision" in result.output
+
+
+def test_interactive_start_non_tty_stops_at_first_pending_action(
+    clarification_stub_server, cli_config_dir: Path
+) -> None:
+    """Without a TTY (e.g. CI), `start` must not block waiting on input --
+    it should stop at the first pending action and point at the scriptable
+    escape hatches instead."""
+    workspace, port = clarification_stub_server
+    _write_config(cli_config_dir, workspace, port=port)
+
+    result = runner.invoke(app, ["start", "--prompt", _REQUIREMENT_TEXT])
+
+    assert result.exit_code == 0, result.output
+    assert "Clarification requested" in result.output
+    assert "Non-interactive session" in result.output
+    assert "ai-sdlc answer" in result.output
+
+
+def test_interactive_start_keyboard_interrupt_leaves_workflow_paused(
+    clarification_stub_server, cli_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, port = clarification_stub_server
+    _write_config(cli_config_dir, workspace, port=port)
+    monkeypatch.setattr("ai_sdlc.cli.handlers._is_interactive_session", lambda: True)
+
+    def _raise_interrupt(*args, **kwargs):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr("rich.console.Console.input", _raise_interrupt)
+
+    result = runner.invoke(app, ["start", "--prompt", _REQUIREMENT_TEXT])
+
+    assert result.exit_code == 0, result.output
+    assert "Interrupted" in result.output
+    assert "paused" in result.output
+
+    status_result = runner.invoke(app, ["status"])
+    assert status_result.exit_code == 0, status_result.output
+    assert "Clarification requested" in status_result.output
+
+    answer_result = runner.invoke(app, ["answer", "Use a modular monolith with a dedicated cache layer."])
+    assert answer_result.exit_code == 0, answer_result.output
+    assert "Workflow completed" in answer_result.output
+
+
 def test_answer_with_no_pending_clarification_errors_clearly(real_agents_server, cli_config_dir: Path) -> None:
     workspace, port = real_agents_server
     _write_config(cli_config_dir, workspace, port=port)

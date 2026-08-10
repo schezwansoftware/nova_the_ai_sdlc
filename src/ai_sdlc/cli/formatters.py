@@ -17,6 +17,10 @@ from ai_sdlc.cli.schemas import PendingAction, WorkflowStatusData
 # just won't have a fixed position until this list is updated.
 PIPELINE_PHASES = ["REQUIREMENTS", "ARCHITECTURE", "UX_DESIGN"]
 TERMINAL_PHASES = {"COMPLETED", "FAILED", "CANCELLED"}
+# Statuses that stop `start`'s interactive loop (see handlers.py): the three
+# truly terminal ones above, plus REVISION_REQUIRED, which halts automatic
+# progress on rejection without being a terminal workflow state itself.
+HALT_STATUSES = TERMINAL_PHASES | {"REVISION_REQUIRED"}
 _ARTIFACT_KEY_BY_PHASE = {
     "REQUIREMENTS": "requirements",
     "ARCHITECTURE": "architecture",
@@ -56,6 +60,14 @@ def render_pipeline(console: Console, status: WorkflowStatusData) -> None:
         console.print(Panel("Workflow completed.", style="green"))
     elif status.status in ("FAILED", "CANCELLED"):
         console.print(Panel(f"Workflow {status.status.lower()}.", style="red"))
+    elif status.status == "REVISION_REQUIRED":
+        console.print(
+            Panel(
+                "Workflow needs revision based on reviewer feedback. "
+                "No further pipeline stages will run automatically.",
+                style="yellow",
+            )
+        )
     elif status.pending_action is not None:
         render_pending_action(console, status.pending_action)
 
