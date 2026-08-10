@@ -12,6 +12,7 @@ from ai_sdlc.agents.architecture.architecture_agent import ArchitectureAgent
 from ai_sdlc.agents.base import AgentRequest, AgentResult, AgentStatus
 from ai_sdlc.agents.po.po_agent import POAgent
 from ai_sdlc.agents.registry import AgentRegistry
+from ai_sdlc.agents.ux.ux_agent import UXAgent
 from ai_sdlc.capabilities.providers.mock import MockReasoningProvider
 from ai_sdlc.orchestration.orchestrator import AgentExecutionError
 
@@ -34,6 +35,16 @@ ARCHITECTURE_METADATA = {
     "output_schema": "architecture-output-v1",
     "capabilities": ["reasoning"],
     "state_artifact": "architecture.json",
+}
+
+UX_METADATA = {
+    "agent_id": "ux",
+    "version": "1.0",
+    "impl": "ai_sdlc.agents.ux.ux_agent.UXAgent",
+    "input_schema": "ux-input-v1",
+    "output_schema": "ux-output-v1",
+    "capabilities": ["reasoning"],
+    "state_artifact": "ux.json",
 }
 
 
@@ -69,6 +80,19 @@ def test_registry_discovers_and_zero_arg_instantiates_architecture_agent(tmp_pat
     assert registry.get_metadata("architecture") == ARCHITECTURE_METADATA
 
 
+def test_registry_discovers_and_zero_arg_instantiates_ux_agent(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _write_metadata(workspace, UX_METADATA)
+
+    registry = AgentRegistry(workspace)
+
+    agent = registry.get("ux")
+    assert agent is not None
+    assert isinstance(agent, UXAgent)
+    assert registry.get_metadata("ux") == UX_METADATA
+
+
 def test_registry_discovers_both_agents_simultaneously(tmp_path):
     workspace = tmp_path / "repo"
     workspace.mkdir()
@@ -79,6 +103,20 @@ def test_registry_discovers_both_agents_simultaneously(tmp_path):
 
     assert isinstance(registry.get("po"), POAgent)
     assert isinstance(registry.get("architecture"), ArchitectureAgent)
+
+
+def test_registry_discovers_all_three_agents_simultaneously(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _write_metadata(workspace, PO_METADATA)
+    _write_metadata(workspace, ARCHITECTURE_METADATA)
+    _write_metadata(workspace, UX_METADATA)
+
+    registry = AgentRegistry(workspace)
+
+    assert isinstance(registry.get("po"), POAgent)
+    assert isinstance(registry.get("architecture"), ArchitectureAgent)
+    assert isinstance(registry.get("ux"), UXAgent)
 
 
 def test_specialist_agent_execute_never_raises_unhandled_exception_on_success():
@@ -120,5 +158,7 @@ def test_agents_remain_zero_arg_constructible_directly():
     # without going through the registry too.
     po = POAgent()
     arch = ArchitectureAgent()
+    ux = UXAgent()
     assert po.agent_id == "po"
     assert arch.agent_id == "architecture"
+    assert ux.agent_id == "ux"
