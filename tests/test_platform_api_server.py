@@ -24,6 +24,32 @@ def prepare_workspace_with_po(tmp_path: Path) -> Path:
         "state_artifact": "requirements.json",
     }
     (agents_dir / "po.json").write_text(json.dumps(metadata), encoding="utf-8")
+    # The real workflow graph now also runs Architecture and UX after PO
+    # (see DEFAULT_WORKFLOW_NODES in orchestration/langgraph_runner.py), so
+    # any workspace that expects a full run to reach COMPLETED needs both
+    # discoverable too, exactly the way `ai-sdlc init` would eventually
+    # scaffold them (see todo.md's Pixel metadata blocks for the po/
+    # architecture shape this mirrors).
+    architecture_metadata = {
+        "agent_id": "architecture",
+        "version": "1.0",
+        "impl": "ai_sdlc.agents.architecture.architecture_agent.ArchitectureAgent",
+        "input_schema": "architecture-input-v1",
+        "output_schema": "architecture-output-v1",
+        "capabilities": ["reasoning"],
+        "state_artifact": "architecture.json",
+    }
+    (agents_dir / "architecture.json").write_text(json.dumps(architecture_metadata), encoding="utf-8")
+    ux_metadata = {
+        "agent_id": "ux",
+        "version": "1.0",
+        "impl": "ai_sdlc.agents.ux.ux_agent.UXAgent",
+        "input_schema": "ux-input-v1",
+        "output_schema": "ux-output-v1",
+        "capabilities": ["reasoning", "design"],
+        "state_artifact": "ux.json",
+    }
+    (agents_dir / "ux.json").write_text(json.dumps(ux_metadata), encoding="utf-8")
     return workspace
 
 

@@ -42,10 +42,8 @@ class Orchestrator:
             wf = self.load_workflow(workflow_id)
             if not wf:
                 raise RuntimeError("workflow not found")
-            from ai_sdlc.orchestration.langgraph_runner import LangGraphRunner
-            nodes = [
-                {"id": "requirements", "type": "agent", "agent_id": "po"},
-            ]
+            from ai_sdlc.orchestration.langgraph_runner import DEFAULT_WORKFLOW_NODES, LangGraphRunner
+            nodes = list(DEFAULT_WORKFLOW_NODES)
             runner = LangGraphRunner(self, wf, nodes=nodes, inputs=inputs)
             return runner.run()
 
@@ -92,8 +90,8 @@ class Orchestrator:
             # resume by invoking runner; invoke_agent_for_stage will merge
             # the now-updated wf.inputs (including clarification_answers)
             # into the agent's request automatically.
-            from ai_sdlc.orchestration.langgraph_runner import LangGraphRunner
-            nodes = [{"id": "requirements", "type": "agent", "agent_id": "po"}]
+            from ai_sdlc.orchestration.langgraph_runner import DEFAULT_WORKFLOW_NODES, LangGraphRunner
+            nodes = list(DEFAULT_WORKFLOW_NODES)
             runner = LangGraphRunner(self, wf, nodes=nodes)
             return runner.resume_after_clarification(answer, question_id)
 
@@ -126,8 +124,8 @@ class Orchestrator:
                 wf.pending_approval = None
                 wf.status = WorkflowStatus.RUNNING
                 self.save_workflow(wf)
-                from ai_sdlc.orchestration.langgraph_runner import LangGraphRunner
-                nodes = [{"id": "requirements", "type": "agent", "agent_id": "po"}]
+                from ai_sdlc.orchestration.langgraph_runner import DEFAULT_WORKFLOW_NODES, LangGraphRunner
+                nodes = list(DEFAULT_WORKFLOW_NODES)
                 runner = LangGraphRunner(self, wf, nodes=nodes)
                 return runner.run()
             else:
@@ -148,7 +146,14 @@ class Orchestrator:
             inputs=inputs or {},
         )
 
-    def invoke_agent_for_stage(self, wf: WorkflowState, agent_id: str, action: str = "default", inputs: Dict[str, Any] = None) -> Dict:
+    def invoke_agent_for_stage(
+        self,
+        wf: WorkflowState,
+        agent_id: str,
+        action: str = "default",
+        inputs: Dict[str, Any] = None,
+        output_key: Optional[str] = None,
+    ) -> Dict:
         """Invoke an agent for the current workflow stage.
 
         Behavior:
@@ -160,6 +165,14 @@ class Orchestrator:
         - Handle needs_clarification and needs_approval by persisting records
         - Retry on AgentExecutionError when retryable and attempts < max_attempts
         - Emit audit events for agent_completed/failed/clarification/approval
+
+        `output_key`, when provided by the calling graph node (see
+        `LangGraphRunner.DEFAULT_WORKFLOW_NODES`), is where a COMPLETED
+        result's `AgentResult.data` gets merged onto `wf.inputs` so the
+        next node in the graph automatically receives this node's
+        structured output as part of its own merged inputs. This keeps the
+        graph declarative -- new stages can be wired in by adding a node
+        dict, without editing this method.
         """
         agent = self.registry.get(agent_id)
         if not agent:
@@ -263,6 +276,13 @@ class Orchestrator:
                 # mark stage complete
                 if wf.current_stage:
                     wf.stages[wf.current_stage] = "completed"
+                # Thread this node's structured output onto wf.inputs under
+                # its declared output_key so the next graph node's
+                # merged_inputs (computed at the top of this loop) picks it
+                # up automatically -- e.g. PO's output_key="requirements"
+                # becomes inputs["requirements"] for Architecture/UX.
+                if output_key:
+                    wf.inputs[output_key] = result.data
                 wf.status = WorkflowStatus.RUNNING
                 wf.retry_count.pop(agent_id, None)
                 self.save_workflow(wf)
@@ -280,11 +300,16 @@ class Orchestrator:
                 }
                 self.store.write_clarification(qid, question)
                 wf.status = WorkflowStatus.WAITING_FOR_CLARIFICATION
+                # Persist the inputs actually supplied to *this* call (not
+                # just whatever was in wf.inputs before it), so a resume
+                # sees them rather than silently dropping this call's
+                # caller-supplied inputs.
+                wf.inputs = merged_inputs
                 wf.pending_clarification = {
                     "question_id": qid,
                     "stage": wf.current_stage,
                     "question": question.get("question"),
-                    "inputs": wf.inputs.copy(),
+                    "inputs": merged_inputs.copy(),
                 }
                 self.save_workflow(wf)
                 self._emit({"event": "clarification_requested", "workflow_id": wf.workflow_id, "question_id": qid, "agent_id": agent_id})
@@ -303,11 +328,15 @@ class Orchestrator:
                 }
                 self.store.write_approval(aid, approval)
                 wf.status = WorkflowStatus.WAITING_FOR_APPROVAL
+                # Same fix as the clarification branch above: persist this
+                # call's actual merged inputs onto wf.inputs, not just what
+                # was there before the interrupt.
+                wf.inputs = merged_inputs
                 wf.pending_approval = {
                     "approval_id": aid,
                     "stage": wf.current_stage,
                     "artifact": approval.get("artifact"),
-                    "inputs": wf.inputs.copy(),
+                    "inputs": merged_inputs.copy(),
                 }
                 self.save_workflow(wf)
                 self._emit({"event": "approval_requested", "workflow_id": wf.workflow_id, "approval_id": aid, "stage": wf.current_stage})

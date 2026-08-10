@@ -5,11 +5,36 @@ from ai_sdlc.orchestration.orchestrator import Orchestrator
 from ai_sdlc.orchestration.state import WorkflowState, WorkflowStatus
 
 
+# Default MVP workflow graph: PO -> Architecture -> UX design, executed
+# sequentially (see docs/architecture/v1_architecture.md section 5.2's
+# WorkflowPhase ordering; LangGraphRunner has no branching support today,
+# so Architecture/UX -- both independent consumers of PO's output -- run
+# one after another rather than in parallel).
+#
+# This is the single source of truth for the node list: Orchestrator's
+# run_workflow_graph / resume_workflow_after_clarification /
+# resume_workflow_after_approval all import this rather than hardcoding
+# their own copies, so extending the workflow (e.g. adding a Development
+# node next) only requires editing this one list.
+#
+# Each node's optional "output_key" tells Orchestrator.invoke_agent_for_stage
+# where to merge that node's AgentResult.data onto wf.inputs once it
+# COMPLETEs, so the next node automatically receives it as part of its
+# merged inputs (see Orchestrator.invoke_agent_for_stage). Both the
+# Architecture and UX agents read PO's structured output via
+# request.inputs["requirements"].
+DEFAULT_WORKFLOW_NODES: List[Dict[str, Any]] = [
+    {"id": "requirements", "type": "agent", "agent_id": "po", "output_key": "requirements"},
+    {"id": "architecture", "type": "agent", "agent_id": "architecture", "output_key": "architecture"},
+    {"id": "ux_design", "type": "agent", "agent_id": "ux", "output_key": "ux_design"},
+]
+
+
 class LangGraphRunner:
     """A LangGraph-backed (adapter) runner that executes a simple linear graph
 
-    For V1 the graph is kept simple and linear:
-      requirement_intake -> po -> end
+    For V1 the graph is kept simple and linear -- see DEFAULT_WORKFLOW_NODES
+    above for the current default sequence.
 
     The runner delegates agent execution to the Orchestrator.invoke_agent_for_stage
     and interprets the structured results to perform interrupts (clarification,
@@ -23,9 +48,9 @@ class LangGraphRunner:
         self.orch = orchestrator
         self.wf = workflow
         self.inputs = inputs or {}
-        # nodes is a list of dicts: {"id": "po", "type": "agent", "agent_id": "po"}
+        # nodes is a list of dicts: {"id": "po", "type": "agent", "agent_id": "po", "output_key": "requirements"}
         if nodes is None:
-            self.nodes = [{"id": "po", "type": "agent", "agent_id": "po"}]
+            self.nodes = list(DEFAULT_WORKFLOW_NODES)
         else:
             self.nodes = nodes
 
@@ -54,7 +79,9 @@ class LangGraphRunner:
             if ntype == "agent":
                 agent_id = node.get("agent_id")
                 node_inputs = self.inputs if i == start_index else None
-                res = self.orch.invoke_agent_for_stage(self.wf, agent_id, inputs=node_inputs)
+                res = self.orch.invoke_agent_for_stage(
+                    self.wf, agent_id, inputs=node_inputs, output_key=node.get("output_key")
+                )
 
                 # handle responses from orchestrator.invoke_agent_for_stage
                 status = res.get("status")
@@ -97,10 +124,13 @@ class LangGraphRunner:
         node_index = next((i for i, n in enumerate(self.nodes) if n.get("id") == current_stage), None)
         if node_index is None:
             return {"status": "unknown_stage"}
-        agent_id = self.nodes[node_index].get("agent_id")
+        node = self.nodes[node_index]
+        agent_id = node.get("agent_id")
         merged_inputs = self.inputs.copy() if self.inputs else {}
         merged_inputs.update({"clarification_answer": answer, "question_id": question_id})
-        res = self.orch.invoke_agent_for_stage(self.wf, agent_id, inputs=merged_inputs)
+        res = self.orch.invoke_agent_for_stage(
+            self.wf, agent_id, inputs=merged_inputs, output_key=node.get("output_key")
+        )
         if res.get("status") != "completed":
             return res
 

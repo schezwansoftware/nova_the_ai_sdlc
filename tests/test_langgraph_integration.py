@@ -20,6 +20,31 @@ def prepare_workspace(tmp_path):
         "state_artifact": "requirements.json"
     }
     (agents_dir / "po.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+    # The real workflow graph now also runs Architecture and UX after PO
+    # (see DEFAULT_WORKFLOW_NODES in orchestration/langgraph_runner.py), so
+    # a full run needs both discoverable too, or it will stop at
+    # "Agent not found" once it reaches those nodes.
+    architecture_metadata = {
+        "agent_id": "architecture",
+        "version": "1.0",
+        "impl": "ai_sdlc.agents.architecture.architecture_agent.ArchitectureAgent",
+        "input_schema": "architecture-input-v1",
+        "output_schema": "architecture-output-v1",
+        "capabilities": ["reasoning"],
+        "state_artifact": "architecture.json",
+    }
+    (agents_dir / "architecture.json").write_text(json.dumps(architecture_metadata), encoding="utf-8")
+    ux_metadata = {
+        "agent_id": "ux",
+        "version": "1.0",
+        "impl": "ai_sdlc.agents.ux.ux_agent.UXAgent",
+        "input_schema": "ux-input-v1",
+        "output_schema": "ux-output-v1",
+        "capabilities": ["reasoning", "design"],
+        "state_artifact": "ux.json",
+    }
+    (agents_dir / "ux.json").write_text(json.dumps(ux_metadata), encoding="utf-8")
     return workspace
 
 
@@ -53,6 +78,17 @@ def test_requirement_po_clarify_and_resume(tmp_path):
     assert res["status"] == "needs_clarification"
     qid = res["question_id"]
 
+    # invoke_agent_for_stage now persists this call's merged inputs onto
+    # wf.inputs (so real per-call data, like PO's structured requirements,
+    # threads forward to the next graph node) -- as a side effect the
+    # test-only `force: "clarify"` hook would otherwise persist too and
+    # re-trigger clarification forever on resume. A real clarification
+    # round never carries a "force" flag, so clear it before resuming,
+    # exactly as a real caller's inputs wouldn't have included it.
+    wf_paused = orch.load_workflow(wf_loaded.workflow_id)
+    wf_paused.inputs.pop("force", None)
+    orch.save_workflow(wf_paused)
+
     # resume after providing answer
     resume_res = orch.resume_workflow_after_clarification(wf_loaded.workflow_id, qid, "Only selected fields")
     assert resume_res["status"] == "completed"
@@ -80,6 +116,14 @@ def test_requirement_po_approval_and_resume(tmp_path):
     res = orch.invoke_agent_for_stage(wf_loaded, "po", inputs={"force": "approval"})
     assert res["status"] == "needs_approval"
     aid = res["approval_id"]
+
+    # Same reasoning as the clarification test above: clear the test-only
+    # `force` hook (now persisted onto wf.inputs by invoke_agent_for_stage)
+    # before resuming, or POAgent.execute() would request approval again
+    # instead of proceeding.
+    wf_paused = orch.load_workflow(wf_loaded.workflow_id)
+    wf_paused.inputs.pop("force", None)
+    orch.save_workflow(wf_paused)
 
     # Approve and resume
     resume_res = orch.resume_workflow_after_approval(wf_loaded.workflow_id, aid, "approved")
@@ -146,7 +190,26 @@ def test_retryable_failure_then_success(tmp_path):
             if self.calls < 2:
                 raise AgentExecutionError("transient", retryable=True)
             from ai_sdlc.agents.base import AgentResult, AgentStatus
-            return AgentResult(request_id=request.request_id, workflow_id=request.workflow_id, agent_id="po", status=AgentStatus.COMPLETED)
+            # Return schema-valid structured data (not just a bare
+            # COMPLETED status): the real graph now runs Architecture/UX
+            # after this node, both of which require
+            # inputs["requirements"] (threaded forward from this node's
+            # AgentResult.data via output_key) to be a populated dict, or
+            # they'd request clarification instead of completing.
+            return AgentResult(
+                request_id=request.request_id,
+                workflow_id=request.workflow_id,
+                agent_id="po",
+                status=AgentStatus.COMPLETED,
+                data={
+                    "feature_title": "Export Feature",
+                    "summary": "Add an export capability for customers.",
+                    "functional_requirements": ["System shall allow customers to export their data."],
+                    "non_functional_requirements": ["System shall respond within acceptable latency."],
+                    "out_of_scope": [],
+                    "acceptance_criteria": ["User can trigger and download an export."],
+                },
+            )
 
     orch.register_agent("po", Flaky())
 
