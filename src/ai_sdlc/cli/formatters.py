@@ -8,6 +8,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from ai_sdlc.cli.schemas import PendingAction, WorkflowStatusData
+from ai_sdlc.cli.version import CLI_VERSION
 
 # Real execution order of the current workflow graph (see
 # DEFAULT_WORKFLOW_NODES in ai_sdlc.orchestration.langgraph_runner: this is
@@ -26,6 +27,22 @@ _ARTIFACT_KEY_BY_PHASE = {
     "ARCHITECTURE": "architecture",
     "UX_DESIGN": "ux_design",
 }
+
+
+def render_banner(console: Console) -> None:
+    """Shown once, when `start` is about to ask the user for their
+    requirement interactively -- gives the session a clear identity
+    (name/version/description) before it starts prompting."""
+    body = (
+        f"[bold]ai-sdlc[/bold] [dim]v{escape(CLI_VERSION)}[/dim]\n"
+        "AI-powered SDLC automation platform.\n\n"
+        "Turns a raw requirement into a requirements spec, architecture, and UX "
+        "design through a Product Owner -> Architecture -> UX Design agent "
+        "pipeline, pausing to ask you for clarification or approval as needed.\n\n"
+        "Commands: init, start, status, answer, approve, reject, cancel\n"
+        "Run [bold]ai-sdlc --help[/bold] or [bold]ai-sdlc <command> --help[/bold] for details."
+    )
+    console.print(Panel(body, style="cyan", expand=False))
 
 
 def render_pipeline(console: Console, status: WorkflowStatusData) -> None:

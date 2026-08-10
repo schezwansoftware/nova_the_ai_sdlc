@@ -216,6 +216,29 @@ are unchanged and still work as one-shot escape hatches mid-loop.
       beyond whatever the terminal already provides. Fine for V1; revisit
       if clarification answers need to be long-form.
 
+**Follow-up in this same pass:** `start` now also asks for the requirement
+itself interactively when `--prompt` is omitted, rather than requiring the
+flag up front — step zero of the same loop, not a separate feature.
+`_resolve_requirement_interactively` (`handlers.py`) prints a startup
+banner (`formatters.render_banner`: name, version, description, command
+list — pulled from a new `ai_sdlc.cli.version.CLI_VERSION`, sourced via
+`importlib.metadata` so it can't drift from `pyproject.toml`) then prompts
+`Define your requirement, or paste a path to a requirements.txt file:`.
+The input is treated as a file path if it resolves to an existing file
+(read and stripped), otherwise as literal requirement text; either way it's
+re-prompted (client-side, no server round-trip) if the result is under the
+same 10-character minimum `StartWorkflowRequest` enforces. The CLI also
+gained a top-level `--version` flag and a fuller `--help` description.
+Same non-interactive guard as the rest of the loop: with no TTY and no
+`--prompt`, `start` fails fast with the `--prompt "<requirement>"` hint
+instead of blocking on input that will never arrive.
+
+- [ ] Only plain text / file-path requirement input is supported — no
+      editor handoff (`$EDITOR`) for composing a long requirement inline,
+      no stdin-pipe mode (e.g. `cat req.txt | ai-sdlc start`) distinct from
+      the file-path convenience. Worth adding if requirements commonly
+      don't fit on one line comfortably typed at a `>` prompt.
+
 ## Sage — follow-up
 
 - [ ] `RetrievalCapability` is entirely deferred — no stub exists yet in

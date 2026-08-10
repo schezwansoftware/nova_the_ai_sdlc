@@ -127,8 +127,28 @@ def run_init(
     console.print(_server_start_hint(config))
 
 
-def run_start(console: Console, prompt: str, project_context: Optional[Dict[str, Any]] = None) -> None:
+# Mirrors StartWorkflowRequest's Field(..., min_length=10) in both
+# cli/schemas.py and orchestration/api.py -- checked client-side too so the
+# interactive requirement prompt can re-ask instead of round-tripping to
+# the server just to learn the text was too short.
+_MIN_REQUIREMENT_LENGTH = 10
+
+
+def run_start(console: Console, prompt: Optional[str], project_context: Optional[Dict[str, Any]] = None) -> None:
     config = _require_config(console)
+
+    if prompt is None:
+        if not _is_interactive_session():
+            formatters.render_error(console, "No --prompt given and this session isn't interactive.")
+            console.print('Pass one explicitly: ai-sdlc start --prompt "<requirement>"')
+            raise typer.Exit(code=1)
+        try:
+            prompt = _resolve_requirement_interactively(console)
+        except (KeyboardInterrupt, EOFError):
+            console.print()
+            formatters.render_warning(console, "Cancelled -- no workflow was started.")
+            raise typer.Exit(code=130)
+
     client = _client_for(config)
     try:
         data = client.start_workflow(config.initiator_id, prompt, project_context or {})
@@ -143,6 +163,37 @@ def run_start(console: Console, prompt: str, project_context: Optional[Dict[str,
     save_config(config)
     formatters.render_success(console, f"Started workflow {data.workflow_id}.")
     _drive_workflow_interactively(console, client, config, data.workflow_id)
+
+
+def _resolve_requirement_interactively(console: Console) -> str:
+    """Ask the user for their requirement (step zero of `start`'s
+    interactive loop, before any workflow exists) -- either typed directly
+    or as a path to a file containing it. Re-prompts until the result meets
+    the server's minimum length instead of round-tripping a doomed request."""
+    formatters.render_banner(console)
+    console.print("Define your requirement, or paste a path to a requirements.txt file:")
+
+    while True:
+        raw = console.input("[bold]> [/bold]").strip()
+        if not raw:
+            console.print("[dim]A requirement is needed to continue.[/dim]")
+            continue
+
+        candidate_path = Path(raw).expanduser()
+        if candidate_path.is_file():
+            text = candidate_path.read_text(encoding="utf-8").strip()
+            console.print(f"[dim]Read requirement from {candidate_path}.[/dim]")
+        else:
+            text = raw
+
+        if len(text) < _MIN_REQUIREMENT_LENGTH:
+            console.print(
+                f"[yellow]That's {len(text)} character(s); the requirement needs to be at least "
+                f"{_MIN_REQUIREMENT_LENGTH}. Please add more detail.[/yellow]"
+            )
+            continue
+
+        return text
 
 
 def _drive_workflow_interactively(

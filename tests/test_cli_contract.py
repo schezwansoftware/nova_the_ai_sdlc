@@ -80,6 +80,22 @@ def real_agents_server(tmp_path: Path):
         thread.join(timeout=5)
 
 
+def test_version_flag_prints_version_and_exits(tmp_path: Path, cli_config_dir: Path) -> None:
+    from ai_sdlc.cli.version import CLI_VERSION
+
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0, result.output
+    assert CLI_VERSION in result.output
+
+
+def test_help_lists_all_commands_and_description(tmp_path: Path, cli_config_dir: Path) -> None:
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0, result.output
+    for command in ("init", "start", "status", "answer", "approve", "reject", "cancel"):
+        assert command in result.output
+    assert "interactive CLI" in result.output
+
+
 def test_init_scaffolds_config_and_agent_metadata_and_detects_missing_server(
     tmp_path: Path, cli_config_dir: Path
 ) -> None:
@@ -178,6 +194,53 @@ def test_happy_path_start_reaches_completed(real_agents_server, cli_config_dir: 
     status_result = runner.invoke(app, ["status"])
     assert status_result.exit_code == 0, status_result.output
     assert "Workflow completed" in status_result.output
+
+
+def test_start_without_prompt_asks_interactively_and_rejects_too_short_text(
+    real_agents_server, cli_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, port = real_agents_server
+    _write_config(cli_config_dir, workspace, port=port)
+    monkeypatch.setattr("ai_sdlc.cli.handlers._is_interactive_session", lambda: True)
+
+    result = runner.invoke(app, ["start"], input=f"too short\n{_REQUIREMENT_TEXT}\n")
+
+    assert result.exit_code == 0, result.output
+    assert "ai-sdlc" in result.output  # banner
+    assert "Define your requirement" in result.output
+    assert "needs to be at least" in result.output  # re-prompted after "too short"
+    assert "Workflow completed" in result.output
+
+
+def test_start_without_prompt_reads_requirement_from_file_path(
+    real_agents_server, cli_config_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace, port = real_agents_server
+    _write_config(cli_config_dir, workspace, port=port)
+    monkeypatch.setattr("ai_sdlc.cli.handlers._is_interactive_session", lambda: True)
+
+    requirement_file = tmp_path / "requirement.txt"
+    requirement_file.write_text(_REQUIREMENT_TEXT, encoding="utf-8")
+
+    result = runner.invoke(app, ["start"], input=f"{requirement_file}\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Read requirement from" in result.output
+    assert "Workflow completed" in result.output
+
+
+def test_start_without_prompt_non_interactive_fails_without_blocking(
+    tmp_path: Path, cli_config_dir: Path
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _write_config(cli_config_dir, workspace, port=8299)
+
+    result = runner.invoke(app, ["start"])
+
+    assert result.exit_code == 1
+    assert "isn't interactive" in result.output
+    assert '--prompt "<requirement>"' in result.output
 
 
 def test_clarification_interrupt_answer_resumes_to_completion(clarification_stub_server, cli_config_dir: Path) -> None:
