@@ -23,6 +23,7 @@ The platform operates as an orchestrated multi-agent network designed to convert
 - **Decoupled AI Capability Abstraction:** Agents invoke abstract capabilities (e.g., `ReasoningCapability`, `CodingCapability`, `DesignCapability`) rather than bound vendor APIs. Models are dynamically configurable and hot-swappable across OpenAI, Anthropic, and local/self-hosted instances.
 - **Progressive UX Design as a First-Class Artifact:** The UX Agent produces structured UX specifications plus progressive visual design artifacts (lo-fi, mid-fi, hi-fi) that are persisted, versioned, reviewed, and handed to downstream engineering agents as a formal artifact package.
 - **Pluggable Visual Design Providers:** Visual design generation is implemented through a provider-agnostic design capability, not by hard-coding model vendors or design applications such as Figma. A Figma integration, if introduced later, is a distinct Nexus-owned provider implementation rather than the default architecture.
+- **File-Based Standards Layer for Org/Project Conventions:** Organization- and project-specific conventions (approved libraries, coding style, documentation format, UI/UX libraries, backend architecture, code review format) are captured as git-versioned `instructions.md` + domain-scoped `skills/*.md` files, resolved org → project and injected directly into agent prompts — not retrieved via RAG. Sage's RAG index is reserved for large, unstructured, or fast-changing knowledge (the codebase, Confluence, Jira) that can't be hand-curated into a file. See §9.1.
 - **CLI-First with API Boundary:** V1 delivers a local CLI interfacing directly with the platform engine via a local JSON-RPC / REST contract over IPC/HTTP, guaranteeing full GUI compatibility without refactoring core orchestration logic.
 
 ---
@@ -63,6 +64,13 @@ flowchart TD
         Test["Testing Agent"]
         Sec["Security Agent"]
         Doc["Documentation Agent"]
+    end
+
+    %% Standards & Convention Context
+    subgraph StandardsLayer["Standards & Convention Context Layer (Craft)"]
+        StdResolver["Standards Resolver"]
+        OrgStd["Org instructions.md / skills/*.md"]
+        ProjStd["Project .ai-sdlc/standards/"]
     end
 
     %% Abstraction & Tooling
@@ -113,6 +121,10 @@ flowchart TD
     LangGraphEngine <-->|JSON Contract| Sec
     LangGraphEngine <-->|JSON Contract| Doc
 
+    OrgStd --> StdResolver
+    ProjStd --> StdResolver
+    StdResolver -->|merged instruction context| PO & UX & Arch & Dev & Test & Sec & Doc
+
     PO & UX & Arch & Dev & Test & Sec & Doc --> CapEngine
     CapEngine --> Reasoning & Coding & Retrieval & Design
     CapEngine <--> LLMExt
@@ -142,6 +154,7 @@ flowchart TD
 | **Integration Adapter (MCP Engine)** | External Tool Gateway        | Exposes standardized tools (Git, Jira, Confluence, Filesystem) over Model Context Protocol (MCP) and native adapters. Nexus can also surface provider-specific adapters for visual design services, but the UX contract remains provider-agnostic.                                                                                                         | Tool call requests, integration credentials        | Standardized tool call execution results           | `mcp`, platform credentials  | **Nexus**                  |
 | **Design Capability Adapter**        | Pluggable Visual Design Execution | Implements the `DesignCapability` abstraction (`capabilities/design.py`) plus its default/mock provider for the UX Agent, using the same seam-only pattern as `ReasoningCapability`. Real vendor/design-tool providers (including any future Figma provider) are separate implementations behind this seam, built and owned by whoever supplies that integration (e.g. **Nexus** for `integrations/design_provider.py`) — this row is the abstraction itself, not any specific provider. | Design request payloads, provider policy, artifact fidelity needs | Structured design artifacts, artifact metadata, provider response envelopes | Capability Router, provider SDKs | **Craft** |
 | **Knowledge Engine**                 | Context Assembly             | Performs hybrid RAG search across codebase, Jira, and Confluence to inject precise context into agent prompts.                                                                                                                | Query strings, semantic context scope              | Context bundles, metadata-attributed code snippets | Vector DB, embedding models  | **Sage**                   |
+| **Standards Resolver**               | Org/Project Convention Injection | Resolves and merges `instructions.md` + domain-scoped `skills/*.md` across platform → org → project scope; selects the agent-relevant subset and injects it into prompt assembly.                                          | Org config path, project `.ai-sdlc/standards/`, agent_id | Merged instruction context bundle             | Filesystem, Agent Factory    | **Craft**                  |
 | **Developer Runtime**                | Code Generation & Execution  | Interfaces with repo files, executes local builds/tests via CLI, interacts with GitHub Copilot CLI, and manages Git branches.                                                                                                 | Code modification specs, test commands             | Patch files, execution outputs, PR URLs            | Git CLI, subshell execution  | **Forge**                  |
 | **Agent Factory**                    | Specialist Instantiation     | Provides structural base classes and builders to generate specialist SDLC agents (PO, UX, Arch, Sec, Test).                                                                                                                   | Agent config, prompt templates, tools              | Executable specialist agent instances              | Capability Engine, Nexus     | **Craft**                  |
 | **Client UI / CLI**                  | Human Interaction Layer      | Renders workflow status, formats artifact diffs, prompts for clarification, and captures milestone approvals via Public API endpoints.                                                                                        | User terminal input, Orchestrator IPC events       | User approval signals, text prompts                | `rich`, `typer`, Async IPC   | **Pixel**                  |
@@ -931,6 +944,46 @@ Model Layer     Anthropic             OpenAI               Local / Ollama
 
 ---
 
+## 9.1 Standards & Convention Context Layer
+
+Org- and project-specific standards (approved libraries, coding style, documentation format, UI/UX libraries, backend architecture, code review format) are **curated and authored by humans**, unlike the codebase or Confluence — so they don't need semantic retrieval. **Craft** owns a lightweight, file-based, git-versioned **Standards Context Layer**, loaded directly into agent prompts rather than retrieved via RAG — the same convention proven by `CLAUDE.md`/skills-style files for coding agents.
+
+### Layout
+
+```
+~/.ai-sdlc/org/                        # Org-wide, synced from a central org config repo
+├── instructions.md                    # Hard rules: approved libraries, security policy, PR/review format
+└── skills/
+    ├── backend-architecture.md
+    ├── ui-ux-libraries.md
+    ├── code-review-format.md
+    └── documentation-format.md
+
+<target-repo>/.ai-sdlc/standards/      # Project-level, committed alongside the code
+├── instructions.md                    # Project overrides/additions to org rules
+└── skills/
+    ├── backend-architecture.md        # e.g. "this service uses Spring Boot + Gradle, not the org default"
+    └── ...
+
+```
+
+### Resolution Order
+
+1. Platform defaults (built-in, minimal).
+2. Org-level `instructions.md` + `skills/*.md`.
+3. Project-level `instructions.md` + `skills/*.md` — narrowest scope wins on conflict.
+
+At agent-instantiation time, the **Standards Resolver** merges these layers and hands **Agent Factory** only the `skills/*.md` file(s) relevant to the invoking agent's domain — e.g. the Architecture Agent receives `backend-architecture.md` + `instructions.md`, not `ui-ux-libraries.md` — keeping injected context small and on-topic. Because these files are authored and bounded in size, they are injected **in full**: no chunking, embedding, or retrieval-quality risk.
+
+### Division of Labor vs. Sage RAG
+
+| Source                                  | Mechanism                        | Use For                                                                                          |
+| ---------------------------------------- | --------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Standards Context Layer (Craft)          | Direct file load, git-versioned   | Curated, authored standards: approved libraries, style guides, review/doc format, arch conventions |
+| Knowledge Engine / RAG (Sage)            | Hybrid BM25 + Dense retrieval     | Large, unstructured, or fast-changing knowledge: the actual codebase, Confluence spaces, Jira history |
+
+---
+
 ## 10. Security Architecture
 
 **Aegis** establishes enterprise security guardrails across every layer:
@@ -993,6 +1046,9 @@ ai-sdlc-platform/
 │   ├── knowledge/          # (Sage) RAG & Context Engine
 │   │   ├── indexer.py
 │   │   └── retriever.py
+│   ├── standards/          # (Craft) Standards Context Layer
+│   │   ├── resolver.py     # Org -> project instructions.md + skills/*.md merge
+│   │   └── loader.py
 │   ├── security/           # (Aegis) Policy & Guardrails
 │   │   ├── sanitizer.py
 │   │   └── permissions.py
@@ -1048,7 +1104,7 @@ All agent actions, LLM calls, tool executions, public API invocations, and state
 ## 16. MVP Scope
 
 - **Must Have:** Public Orchestrator API (`v1`), CLI interface, Orion LangGraph runner, file-backed `.ai-sdlc/` state, PO/Arch/Dev/Testing agents, local Git + GitHub PR integration.
-- **Should Have:** UX Agent contract extension for structured UX + visual artifacts, `.ai-sdlc/ux.json` artifact manifest support, approval/revision workflow for UX design packages, and a pluggable `DesignCapability` with at least one provider implementation.
+- **Should Have:** UX Agent contract extension for structured UX + visual artifacts, `.ai-sdlc/ux.json` artifact manifest support, approval/revision workflow for UX design packages, a pluggable `DesignCapability` with at least one provider implementation, and a Standards Context Layer (org/project `instructions.md` + `skills/*.md` resolution).
 - **Later:** Direct Figma file synchronization, advanced multi-provider fallback strategies, and full visual-editing workflows beyond the artifact handoff model.
 
 ---
@@ -1065,6 +1121,7 @@ Phase 1: Public API & State Foundation (Atlas / Core / Orion)
 Phase 2: Specialist Agents & Capabilities (Craft / Sage / Forge)
    ├── Implement/extend the UX Agent contract with additive visual-artifact fields
    ├── Introduce `DesignCapability` and a first provider adapter (multimodal or image-provider based)
+   ├── Implement Standards Resolver (org/project instructions.md + skills/*.md)
    ├── Implement the UX review/revision loop and approval semantics
    └── Implement Developer Agent handoff to the approved UX artifact package
 
