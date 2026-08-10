@@ -47,6 +47,14 @@ class AgentResult(BaseModel):
     findings: Optional[list] = []
     questions: Optional[list] = []
     warnings: Optional[list] = []
+    # Additive field (not present in the original Atlas contract as
+    # implemented): structured payload produced by a specialist agent
+    # (e.g. a POAgentOutputData/ArchitectureOutputData dump). Agents are
+    # stateless and never write to `.ai-sdlc/` themselves, so this is the
+    # only place a specialist agent's structured output travels back to
+    # Orion. Optional/backward-compatible: existing callers that never set
+    # it are unaffected.
+    data: Optional[Dict[str, Any]] = None
 
 
 class Agent(ABC):
