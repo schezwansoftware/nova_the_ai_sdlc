@@ -200,10 +200,10 @@ importing it. All seven documented commands (`init`, `start`, `status`,
 
 ## Project-level
 
-- [ ] No `pyproject.toml`/packaging config exists at the repo root. Tests
-      currently only run via `PYTHONPATH=src python3 -m pytest tests`,
-      using a Python interpreter that has `pydantic` installed. Predates
-      Craft's change; not clearly any single owner's task yet — needs a
-      decision on who owns packaging/build config. The CLI's console-script
-      entry point (`ai-sdlc = ai_sdlc.cli.main:app`) is blocked on this
-      same decision (see Pixel's section above).
+- [x] ~~No `pyproject.toml`/packaging config exists at the repo root.~~
+      **Resolved** (this branch, commit `d55002a`): added `pyproject.toml`
+      with `setuptools` src-layout discovery, a real `ai-sdlc` console-script
+      entry point (`ai_sdlc.cli.main:app`), and `[tool.pytest.ini_options]
+      pythonpath = ["src"]` so `PYTHONPATH=src` is no longer required by
+      hand. Verified via `pip install -e .` + `ai-sdlc init/start/status`
+      end-to-end and a full `pytest` run (145/145, no `PYTHONPATH` set).
