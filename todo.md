@@ -152,17 +152,18 @@ importing it. All seven documented commands (`init`, `start`, `status`,
   so a hand-edited or custom agent metadata file survives re-running
   `init`).
 
-- [ ] **No packaging/console-script entry point.** `ai-sdlc <command>` as
-      a literal shell command doesn't exist yet — invoke via `python -m
-      ai_sdlc.cli.main <command>` (or `python -m ai_sdlc.cli`) instead.
-      Deferred along with the pre-existing "No pyproject.toml" project-level
-      item below, since defining a `console_scripts` entry point requires
-      the same packaging decision.
+- [x] ~~No packaging/console-script entry point.~~ **Resolved** (commit
+      `d55002a`, see the project-level item below): `ai-sdlc <command>` now
+      works directly after `pip install -e .`.
 - [ ] **`resume_workflow()` has no CLI command.** Not in the architecture
       doc's §12 command list, so out of scope for this pass, but the
       public API supports it (e.g. resuming a `FAILED`-adjacent or
       manually-paused workflow with no pending HITL interaction). Worth a
-      command if a real use case shows up.
+      command if a real use case shows up. Note this is unrelated to
+      `start`'s interactive loop below — that loop never needed
+      `resume_workflow()`, since `submit_clarification`/`submit_approval`
+      already auto-advance through every already-completed stage
+      server-side (see `LangGraphRunner.run()`).
 - [ ] **`ai-sdlc init`'s `.ai-sdlc/` scaffolding is agent-registry
       metadata only, not full workflow-state initialization.** The
       architecture doc's §12 wording ("Initializes `.ai-sdlc/` state
@@ -175,6 +176,80 @@ importing it. All seven documented commands (`init`, `start`, `status`,
       exists (not in the required command list); a user who used
       `--start-server` has to kill the process themselves. Worth a
       pid-file if this becomes a real workflow.
+
+## Pixel — CLI interactive loop (this pass, branch `agents/pixel-cli-interactive-loop`)
+
+Implements `docs/architecture/v1_architecture.md` §12.1: `ai-sdlc start`
+now drives a workflow to completion in one continuous session instead of
+returning after the first stage. `handlers.run_start` hands off to a new
+`_drive_workflow_interactively` loop that repeatedly calls `get_status`
+and, for each `WAITING_FOR_CLARIFICATION`/`WAITING_FOR_APPROVAL` it sees,
+prompts inline (`console.input`) and submits the answer/decision via the
+existing `submit_clarification`/`submit_approval` client calls, then loops
+again. No new server endpoint or client method was needed — each of those
+calls already runs `LangGraphRunner` forward through every already-completed
+stage on its own, stopping only at the next interrupt or a terminal state;
+the CLI loop just has to react to wherever the server stops it.
+
+The loop halts on `COMPLETED`/`FAILED`/`CANCELLED` (truly terminal) or
+`REVISION_REQUIRED` (rejection halts automatic progress by design, per
+§12.1 step 4 — `formatters.py` now also renders an explanatory panel for
+this status, previously unhandled). `status`/`answer`/`approve`/`reject`
+are unchanged and still work as one-shot escape hatches mid-loop.
+
+- [x] **§20.6 open question (Ctrl-C / non-interactive behavior) resolved
+      for this pass, pending revisit if it needs to be a real decision
+      later:** non-interactive sessions (`sys.stdin.isatty()` false, e.g.
+      CI) never block on input — the loop stops at the first pending
+      action and prints the escape-hatch commands instead of prompting.
+      Ctrl-C (or Ctrl-D/EOF) mid-prompt leaves the workflow exactly where
+      the server already has it (paused on its pending clarification/
+      approval) and exits 0 with a "resume with `answer`/`approve`/
+      `reject`" hint, rather than attempting a cancel — cancelling on an
+      unconfirmed interrupt felt more surprising than just leaving state
+      as-is. No `--no-wait` flag was added; not clearly needed yet since
+      the non-TTY path already covers the CI case without one.
+- [ ] The interactive prompts (`_prompt_and_submit_clarification`,
+      `_prompt_and_submit_approval` in `handlers.py`) are plain
+      `console.input()` loops with minimal validation (non-empty answer,
+      y/n for approval). No multi-line answer support, no readline history
+      beyond whatever the terminal already provides. Fine for V1; revisit
+      if clarification answers need to be long-form.
+
+**Follow-up in this same pass:** `start` now also asks for the requirement
+itself interactively when `--prompt` is omitted, rather than requiring the
+flag up front — step zero of the same loop, not a separate feature.
+`_resolve_requirement_interactively` (`handlers.py`) prints a startup
+banner (`formatters.render_banner`: name, version, description, command
+list — pulled from a new `ai_sdlc.cli.version.CLI_VERSION`, sourced via
+`importlib.metadata` so it can't drift from `pyproject.toml`) then prompts
+`Define your requirement, or paste a path to a requirements.txt file:`.
+The input is treated as a file path if it resolves to an existing file
+(read and stripped), otherwise as literal requirement text; either way it's
+re-prompted (client-side, no server round-trip) if the result is under the
+same 10-character minimum `StartWorkflowRequest` enforces. The CLI also
+gained a top-level `--version` flag and a fuller `--help` description.
+Same non-interactive guard as the rest of the loop: with no TTY and no
+`--prompt`, `start` fails fast with the `--prompt "<requirement>"` hint
+instead of blocking on input that will never arrive.
+
+The banner itself was redone once already: the first version was a plain
+`rich.Panel` of text (name/version/description in a box), which the user
+found "poorly designed." Replaced with a "NOVA" wordmark in a top-to-bottom
+cyan-to-blue gradient (`formatters._BANNER_ART`, figlet "doom" font,
+generated via `pyfiglet.figlet_format("NOVA", font="doom")` then hardcoded
+as a tuple of literal strings -- **do not hand-edit these lines**,
+regenerate from pyfiglet if the wordmark ever needs to change, since the
+glyph shapes depend on exact space/backslash alignment per line) followed
+by the version/tagline/description/commands underneath, unboxed. `pyfiglet`
+was used only to generate the string at dev time -- it is **not** a new
+runtime dependency; `pyproject.toml` is unchanged.
+
+- [ ] Only plain text / file-path requirement input is supported — no
+      editor handoff (`$EDITOR`) for composing a long requirement inline,
+      no stdin-pipe mode (e.g. `cat req.txt | ai-sdlc start`) distinct from
+      the file-path convenience. Worth adding if requirements commonly
+      don't fit on one line comfortably typed at a `>` prompt.
 
 ## Sage — follow-up
 

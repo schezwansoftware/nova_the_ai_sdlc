@@ -9,13 +9,42 @@ import typer
 from rich.console import Console
 
 from ai_sdlc.cli import handlers
+from ai_sdlc.cli.version import CLI_VERSION
 
-app = typer.Typer(add_completion=False, help="ai-sdlc: thin CLI client for the Nova AI SDLC platform.")
+APP_DESCRIPTION = (
+    "ai-sdlc: an interactive CLI for the Nova AI SDLC platform.\n\n"
+    "`start` drives a raw requirement through the Requirements -> Architecture -> "
+    "UX Design agent pipeline in one continuous session, prompting inline for any "
+    "clarification or approval it needs along the way. `status`/`answer`/`approve`/"
+    "`reject`/`cancel` remain available as one-shot commands for scripting or for "
+    "resuming a session you left mid-loop."
+)
+
+app = typer.Typer(add_completion=False, help=APP_DESCRIPTION)
 console = Console()
 
 _WORKFLOW_ID_OPTION = typer.Option(
     None, "--workflow-id", help="Target a specific workflow instead of the most recently started one."
 )
+
+
+def _version_callback(show_version: bool) -> None:
+    if show_version:
+        console.print(f"ai-sdlc [bold]{CLI_VERSION}[/bold]")
+        raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    version: Optional[bool] = typer.Option(
+        None,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show the ai-sdlc CLI version and exit.",
+    ),
+) -> None:
+    return
 
 
 @app.command()
@@ -40,9 +69,22 @@ def init(
 
 @app.command()
 def start(
-    prompt: str = typer.Option(..., "--prompt", help="Raw requirement text (minimum 10 characters)."),
+    prompt: Optional[str] = typer.Option(
+        None,
+        "--prompt",
+        help=(
+            "Raw requirement text (minimum 10 characters). If omitted, you'll be "
+            "prompted for it interactively."
+        ),
+    ),
 ) -> None:
-    """Start a new workflow from a raw requirement."""
+    """Start a new workflow and drive it to completion interactively.
+
+    Prompts for the requirement if --prompt isn't given (as text, or as a
+    path to a file containing it), then loops -- auto-continuing through
+    completed stages and prompting inline for any clarification/approval --
+    until the workflow reaches a terminal state.
+    """
     handlers.run_start(console, prompt)
 
 

@@ -6,8 +6,25 @@ from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from ai_sdlc.cli.schemas import PendingAction, WorkflowStatusData
+from ai_sdlc.cli.version import CLI_VERSION
+
+# "NOVA" wordmark (figlet "doom" font) -- Nova is this platform's product
+# name; `ai-sdlc` is just the command you type to reach it. Each line is
+# rendered in its own shade below for a top-to-bottom gradient. Generated
+# via `pyfiglet.figlet_format("NOVA", font="doom")` -- edit only by
+# regenerating from that, not by hand (glyph alignment is spacing-exact).
+_BANNER_ART = (
+    " _   _ _____  _   _  ___  ",
+    "| \\ | |  _  || | | |/ _ \\ ",
+    "|  \\| | | | || | | / /_\\ \\",
+    "| . ` | | | || | | |  _  |",
+    "| |\\  \\ \\_/ /\\ \\_/ / | | |",
+    "\\_| \\_/\\___/  \\___/\\_| |_/",
+)
+_BANNER_GRADIENT = ("bright_cyan", "bright_cyan", "cyan", "cyan", "blue", "bright_blue")
 
 # Real execution order of the current workflow graph (see
 # DEFAULT_WORKFLOW_NODES in ai_sdlc.orchestration.langgraph_runner: this is
@@ -17,11 +34,49 @@ from ai_sdlc.cli.schemas import PendingAction, WorkflowStatusData
 # just won't have a fixed position until this list is updated.
 PIPELINE_PHASES = ["REQUIREMENTS", "ARCHITECTURE", "UX_DESIGN"]
 TERMINAL_PHASES = {"COMPLETED", "FAILED", "CANCELLED"}
+# Statuses that stop `start`'s interactive loop (see handlers.py): the three
+# truly terminal ones above, plus REVISION_REQUIRED, which halts automatic
+# progress on rejection without being a terminal workflow state itself.
+HALT_STATUSES = TERMINAL_PHASES | {"REVISION_REQUIRED"}
 _ARTIFACT_KEY_BY_PHASE = {
     "REQUIREMENTS": "requirements",
     "ARCHITECTURE": "architecture",
     "UX_DESIGN": "ux_design",
 }
+
+
+def render_banner(console: Console) -> None:
+    """Shown once, when `start` is about to ask the user for their
+    requirement interactively -- gives the session a clear identity (a
+    wordmark, version, description) before it starts prompting."""
+    console.print()
+    for line, color in zip(_BANNER_ART, _BANNER_GRADIENT):
+        console.print(Text(line, style=f"bold {color}"))
+    console.print(Text(f"ai-sdlc  v{CLI_VERSION}  --  AI-powered SDLC automation platform", style="dim"))
+    console.print()
+    console.print(
+        "Turns a raw requirement into a requirements spec, architecture, and UX "
+        "design through a Product Owner -> Architecture -> UX Design agent "
+        "pipeline, pausing to ask you for clarification or approval as needed.",
+        style="white",
+    )
+    console.print()
+    console.print(
+        Text.assemble(
+            ("Commands: ", "bold"),
+            ("init, start, status, answer, approve, reject, cancel", "cyan"),
+        )
+    )
+    console.print(
+        Text.assemble(
+            "Run ",
+            ("ai-sdlc --help", "bold cyan"),
+            " or ",
+            ("ai-sdlc <command> --help", "bold cyan"),
+            " for details.",
+        )
+    )
+    console.print()
 
 
 def render_pipeline(console: Console, status: WorkflowStatusData) -> None:
@@ -56,6 +111,14 @@ def render_pipeline(console: Console, status: WorkflowStatusData) -> None:
         console.print(Panel("Workflow completed.", style="green"))
     elif status.status in ("FAILED", "CANCELLED"):
         console.print(Panel(f"Workflow {status.status.lower()}.", style="red"))
+    elif status.status == "REVISION_REQUIRED":
+        console.print(
+            Panel(
+                "Workflow needs revision based on reviewer feedback. "
+                "No further pipeline stages will run automatically.",
+                style="yellow",
+            )
+        )
     elif status.pending_action is not None:
         render_pending_action(console, status.pending_action)
 

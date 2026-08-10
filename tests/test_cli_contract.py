@@ -80,6 +80,22 @@ def real_agents_server(tmp_path: Path):
         thread.join(timeout=5)
 
 
+def test_version_flag_prints_version_and_exits(tmp_path: Path, cli_config_dir: Path) -> None:
+    from ai_sdlc.cli.version import CLI_VERSION
+
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0, result.output
+    assert CLI_VERSION in result.output
+
+
+def test_help_lists_all_commands_and_description(tmp_path: Path, cli_config_dir: Path) -> None:
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0, result.output
+    for command in ("init", "start", "status", "answer", "approve", "reject", "cancel"):
+        assert command in result.output
+    assert "interactive CLI" in result.output
+
+
 def test_init_scaffolds_config_and_agent_metadata_and_detects_missing_server(
     tmp_path: Path, cli_config_dir: Path
 ) -> None:
@@ -180,6 +196,53 @@ def test_happy_path_start_reaches_completed(real_agents_server, cli_config_dir: 
     assert "Workflow completed" in status_result.output
 
 
+def test_start_without_prompt_asks_interactively_and_rejects_too_short_text(
+    real_agents_server, cli_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, port = real_agents_server
+    _write_config(cli_config_dir, workspace, port=port)
+    monkeypatch.setattr("ai_sdlc.cli.handlers._is_interactive_session", lambda: True)
+
+    result = runner.invoke(app, ["start"], input=f"too short\n{_REQUIREMENT_TEXT}\n")
+
+    assert result.exit_code == 0, result.output
+    assert "ai-sdlc" in result.output  # banner
+    assert "Define your requirement" in result.output
+    assert "needs to be at least" in result.output  # re-prompted after "too short"
+    assert "Workflow completed" in result.output
+
+
+def test_start_without_prompt_reads_requirement_from_file_path(
+    real_agents_server, cli_config_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace, port = real_agents_server
+    _write_config(cli_config_dir, workspace, port=port)
+    monkeypatch.setattr("ai_sdlc.cli.handlers._is_interactive_session", lambda: True)
+
+    requirement_file = tmp_path / "requirement.txt"
+    requirement_file.write_text(_REQUIREMENT_TEXT, encoding="utf-8")
+
+    result = runner.invoke(app, ["start"], input=f"{requirement_file}\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Read requirement from" in result.output
+    assert "Workflow completed" in result.output
+
+
+def test_start_without_prompt_non_interactive_fails_without_blocking(
+    tmp_path: Path, cli_config_dir: Path
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _write_config(cli_config_dir, workspace, port=8299)
+
+    result = runner.invoke(app, ["start"])
+
+    assert result.exit_code == 1
+    assert "isn't interactive" in result.output
+    assert '--prompt "<requirement>"' in result.output
+
+
 def test_clarification_interrupt_answer_resumes_to_completion(clarification_stub_server, cli_config_dir: Path) -> None:
     workspace, port = clarification_stub_server
     _write_config(cli_config_dir, workspace, port=port)
@@ -187,6 +250,105 @@ def test_clarification_interrupt_answer_resumes_to_completion(clarification_stub
     start_result = runner.invoke(app, ["start", "--prompt", _REQUIREMENT_TEXT])
     assert start_result.exit_code == 0, start_result.output
     assert "Clarification requested" in start_result.output
+
+    status_result = runner.invoke(app, ["status"])
+    assert status_result.exit_code == 0, status_result.output
+    assert "Clarification requested" in status_result.output
+
+    answer_result = runner.invoke(app, ["answer", "Use a modular monolith with a dedicated cache layer."])
+    assert answer_result.exit_code == 0, answer_result.output
+    assert "Workflow completed" in answer_result.output
+
+
+def test_interactive_start_resolves_clarification_inline(
+    clarification_stub_server, cli_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In a real terminal session, `start` should prompt for the answer
+    itself and drive the workflow to completion in one process -- no
+    separate `ai-sdlc answer` invocation needed (docs §12.1)."""
+    workspace, port = clarification_stub_server
+    _write_config(cli_config_dir, workspace, port=port)
+    monkeypatch.setattr("ai_sdlc.cli.handlers._is_interactive_session", lambda: True)
+
+    result = runner.invoke(
+        app,
+        ["start", "--prompt", _REQUIREMENT_TEXT],
+        input="Use a modular monolith with a dedicated cache layer.\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Clarification requested" in result.output
+    assert "Your answer" in result.output
+    assert "Workflow completed" in result.output
+
+
+def test_interactive_start_resolves_approval_approve_inline(
+    approval_stub_server, cli_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, port = approval_stub_server
+    _write_config(cli_config_dir, workspace, port=port)
+    monkeypatch.setattr("ai_sdlc.cli.handlers._is_interactive_session", lambda: True)
+
+    result = runner.invoke(app, ["start", "--prompt", _REQUIREMENT_TEXT], input="y\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Approval requested" in result.output
+    assert "Workflow completed" in result.output
+
+
+def test_interactive_start_resolves_approval_reject_inline_and_halts(
+    approval_stub_server, cli_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, port = approval_stub_server
+    _write_config(cli_config_dir, workspace, port=port)
+    monkeypatch.setattr("ai_sdlc.cli.handlers._is_interactive_session", lambda: True)
+
+    result = runner.invoke(
+        app,
+        ["start", "--prompt", _REQUIREMENT_TEXT],
+        input="n\nNeeds another pass on accessibility.\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Approval requested" in result.output
+    assert "requires revision" in result.output
+    assert "needs revision" in result.output
+
+
+def test_interactive_start_non_tty_stops_at_first_pending_action(
+    clarification_stub_server, cli_config_dir: Path
+) -> None:
+    """Without a TTY (e.g. CI), `start` must not block waiting on input --
+    it should stop at the first pending action and point at the scriptable
+    escape hatches instead."""
+    workspace, port = clarification_stub_server
+    _write_config(cli_config_dir, workspace, port=port)
+
+    result = runner.invoke(app, ["start", "--prompt", _REQUIREMENT_TEXT])
+
+    assert result.exit_code == 0, result.output
+    assert "Clarification requested" in result.output
+    assert "Non-interactive session" in result.output
+    assert "ai-sdlc answer" in result.output
+
+
+def test_interactive_start_keyboard_interrupt_leaves_workflow_paused(
+    clarification_stub_server, cli_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, port = clarification_stub_server
+    _write_config(cli_config_dir, workspace, port=port)
+    monkeypatch.setattr("ai_sdlc.cli.handlers._is_interactive_session", lambda: True)
+
+    def _raise_interrupt(*args, **kwargs):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr("rich.console.Console.input", _raise_interrupt)
+
+    result = runner.invoke(app, ["start", "--prompt", _REQUIREMENT_TEXT])
+
+    assert result.exit_code == 0, result.output
+    assert "Interrupted" in result.output
+    assert "paused" in result.output
 
     status_result = runner.invoke(app, ["status"])
     assert status_result.exit_code == 0, status_result.output
