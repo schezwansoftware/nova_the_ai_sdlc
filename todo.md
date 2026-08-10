@@ -233,6 +233,18 @@ Same non-interactive guard as the rest of the loop: with no TTY and no
 `--prompt`, `start` fails fast with the `--prompt "<requirement>"` hint
 instead of blocking on input that will never arrive.
 
+The banner itself was redone once already: the first version was a plain
+`rich.Panel` of text (name/version/description in a box), which the user
+found "poorly designed." Replaced with a "NOVA" wordmark in a top-to-bottom
+cyan-to-blue gradient (`formatters._BANNER_ART`, figlet "doom" font,
+generated via `pyfiglet.figlet_format("NOVA", font="doom")` then hardcoded
+as a tuple of literal strings -- **do not hand-edit these lines**,
+regenerate from pyfiglet if the wordmark ever needs to change, since the
+glyph shapes depend on exact space/backslash alignment per line) followed
+by the version/tagline/description/commands underneath, unboxed. `pyfiglet`
+was used only to generate the string at dev time -- it is **not** a new
+runtime dependency; `pyproject.toml` is unchanged.
+
 - [ ] Only plain text / file-path requirement input is supported — no
       editor handoff (`$EDITOR`) for composing a long requirement inline,
       no stdin-pipe mode (e.g. `cat req.txt | ai-sdlc start`) distinct from

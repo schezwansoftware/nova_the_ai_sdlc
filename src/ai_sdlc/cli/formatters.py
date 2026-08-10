@@ -6,9 +6,25 @@ from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from ai_sdlc.cli.schemas import PendingAction, WorkflowStatusData
 from ai_sdlc.cli.version import CLI_VERSION
+
+# "NOVA" wordmark (figlet "doom" font) -- Nova is this platform's product
+# name; `ai-sdlc` is just the command you type to reach it. Each line is
+# rendered in its own shade below for a top-to-bottom gradient. Generated
+# via `pyfiglet.figlet_format("NOVA", font="doom")` -- edit only by
+# regenerating from that, not by hand (glyph alignment is spacing-exact).
+_BANNER_ART = (
+    " _   _ _____  _   _  ___  ",
+    "| \\ | |  _  || | | |/ _ \\ ",
+    "|  \\| | | | || | | / /_\\ \\",
+    "| . ` | | | || | | |  _  |",
+    "| |\\  \\ \\_/ /\\ \\_/ / | | |",
+    "\\_| \\_/\\___/  \\___/\\_| |_/",
+)
+_BANNER_GRADIENT = ("bright_cyan", "bright_cyan", "cyan", "cyan", "blue", "bright_blue")
 
 # Real execution order of the current workflow graph (see
 # DEFAULT_WORKFLOW_NODES in ai_sdlc.orchestration.langgraph_runner: this is
@@ -31,18 +47,36 @@ _ARTIFACT_KEY_BY_PHASE = {
 
 def render_banner(console: Console) -> None:
     """Shown once, when `start` is about to ask the user for their
-    requirement interactively -- gives the session a clear identity
-    (name/version/description) before it starts prompting."""
-    body = (
-        f"[bold]ai-sdlc[/bold] [dim]v{escape(CLI_VERSION)}[/dim]\n"
-        "AI-powered SDLC automation platform.\n\n"
+    requirement interactively -- gives the session a clear identity (a
+    wordmark, version, description) before it starts prompting."""
+    console.print()
+    for line, color in zip(_BANNER_ART, _BANNER_GRADIENT):
+        console.print(Text(line, style=f"bold {color}"))
+    console.print(Text(f"ai-sdlc  v{CLI_VERSION}  --  AI-powered SDLC automation platform", style="dim"))
+    console.print()
+    console.print(
         "Turns a raw requirement into a requirements spec, architecture, and UX "
         "design through a Product Owner -> Architecture -> UX Design agent "
-        "pipeline, pausing to ask you for clarification or approval as needed.\n\n"
-        "Commands: init, start, status, answer, approve, reject, cancel\n"
-        "Run [bold]ai-sdlc --help[/bold] or [bold]ai-sdlc <command> --help[/bold] for details."
+        "pipeline, pausing to ask you for clarification or approval as needed.",
+        style="white",
     )
-    console.print(Panel(body, style="cyan", expand=False))
+    console.print()
+    console.print(
+        Text.assemble(
+            ("Commands: ", "bold"),
+            ("init, start, status, answer, approve, reject, cancel", "cyan"),
+        )
+    )
+    console.print(
+        Text.assemble(
+            "Run ",
+            ("ai-sdlc --help", "bold cyan"),
+            " or ",
+            ("ai-sdlc <command> --help", "bold cyan"),
+            " for details.",
+        )
+    )
+    console.print()
 
 
 def render_pipeline(console: Console, status: WorkflowStatusData) -> None:
