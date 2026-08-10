@@ -1,7 +1,9 @@
 import pytest
 from pydantic import ValidationError
 
+from ai_sdlc.agents.architecture.architecture_agent import ArchitectureAgent
 from ai_sdlc.agents.po.po_agent import POAgent
+from ai_sdlc.agents.ux.ux_agent import UXAgent
 from ai_sdlc.orchestration.api import (
     CancelWorkflowRequest,
     ErrorCode,
@@ -22,6 +24,11 @@ def test_start_and_get_status(tmp_path):
     workspace.mkdir()
     api = OrchestratorAPI(str(workspace))
     api.orch.register_agent("po", POAgent())
+    # The real workflow graph now also runs Architecture and UX after PO
+    # (see DEFAULT_WORKFLOW_NODES in orchestration/langgraph_runner.py), so
+    # a full start_workflow() run needs both registered too.
+    api.orch.register_agent("architecture", ArchitectureAgent())
+    api.orch.register_agent("ux", UXAgent())
 
     req = StartWorkflowRequest(initiator_id="u1", raw_requirement="Add export functionality for customers.", project_context={})
     resp = api.start_workflow(req)
