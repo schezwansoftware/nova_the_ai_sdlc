@@ -1174,7 +1174,7 @@ Unlike a single request/response call, `start` keeps running in the foreground a
 
 This changes the CLI's default UX, not the public API contract: every step in the loop is still just `start`/`status`/`answer`/`approve` calls against the unchanged `v1` API — `start` is simply the first client to chain them together automatically on the user's behalf instead of requiring separate manual invocations per stage.
 
-**Open question (see §20):** exact behavior on interrupt (e.g. Ctrl-C) mid-loop, and whether a non-interactive/CI mode (`--no-wait`, exiting at the first interrupt like the original one-shot behavior) is needed alongside the interactive default, are not yet decided.
+**Resolved** (see §20 Q6): non-interactive sessions (no TTY) never block on input — `start` stops at the first pending action and prints the escape-hatch commands instead of prompting, rather than needing a separate `--no-wait` flag. Ctrl-C/EOF mid-loop leaves the workflow exactly where the server already had it paused and exits cleanly, rather than attempting a cancel.
 
 ---
 
