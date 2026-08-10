@@ -1065,17 +1065,27 @@ ai-sdlc-platform/
 
 ## 12. CLI Architecture
 
-The V1 user experience is powered by a CLI built on `typer` and `rich`, invoking the **Orchestrator Public API Facade** exclusively.
+The V1 user experience is powered by a CLI built on `typer` and `rich`, invoking Core's local HTTP REST API, which itself calls the **Orchestrator Public API Facade** — the CLI never imports `orchestration/`/`agents/` code directly (see §12.1).
 
 ### Commands
 
-- `ai-sdlc init`: Initializes `.ai-sdlc/` state folder in target application repository.
-- `ai-sdlc start --prompt "<requirement>"`: Calls `start_workflow()`.
-- `ai-sdlc status`: Calls `get_workflow_status()` and displays visual pipeline.
-- `ai-sdlc answer "<response>"`: Calls `submit_clarification()`.
-- `ai-sdlc approve`: Calls `submit_approval(approved=True)`.
-- `ai-sdlc reject --reason "<reason>"`: Calls `submit_approval(approved=False, feedback=reason)`.
-- `ai-sdlc cancel`: Calls `cancel_workflow()`.
+- `ai-sdlc init`: Initializes `.ai-sdlc/` state folder, agent registry metadata, and local CLI config in the target application repository; optionally starts the Core Platform API server as a background process (`--start-server`). Deliberately kept **separate** from `start` — set up once, start as many workflows afterward as needed.
+- `ai-sdlc start --prompt "<requirement>"`: The primary human-facing entry point. Calls `start_workflow()`, then **drives the workflow interactively to completion in one continuous session** rather than returning after a single stage (see §12.1 for the loop).
+- `ai-sdlc status`, `answer`, `approve`, `reject`, `cancel`: Discrete, scriptable commands mirroring `get_workflow_status()` / `submit_clarification()` / `submit_approval()` / `cancel_workflow()` 1:1. These remain available as manual escape hatches — resuming a session interrupted mid-loop (e.g. Ctrl-C), CI/non-interactive use, or driving a workflow from outside the interactive session — but a human is no longer expected to reach for them as the primary way to drive a workflow.
+
+### 12.1 `start`'s Interactive Loop
+
+Unlike a single request/response call, `start` keeps running in the foreground and loops until the workflow reaches a terminal status:
+
+1. Invoke the current stage (via `start_workflow()` for the first stage, `resume_workflow()`-equivalent calls thereafter).
+2. If the result is `COMPLETED` for that stage, continue automatically to the next stage — no user action required.
+3. If the result is `NEEDS_CLARIFICATION`, print the question inline and prompt the user for a typed answer in the same terminal session; submit it via `submit_clarification()`; continue automatically.
+4. If the result is `NEEDS_APPROVAL`, print the pending artifact/decision and prompt approve/reject inline; submit via `submit_approval()`; continue automatically on approval, or halt with the existing `REVISION_REQUIRED` semantics on rejection.
+5. Exit once the workflow reaches `COMPLETED`, `FAILED`, or `CANCELLED`, printing the final result.
+
+This changes the CLI's default UX, not the public API contract: every step in the loop is still just `start`/`status`/`answer`/`approve` calls against the unchanged `v1` API — `start` is simply the first client to chain them together automatically on the user's behalf instead of requiring separate manual invocations per stage.
+
+**Open question (see §20):** exact behavior on interrupt (e.g. Ctrl-C) mid-loop, and whether a non-interactive/CI mode (`--no-wait`, exiting at the first interrupt like the original one-shot behavior) is needed alongside the interactive default, are not yet decided.
 
 ---
 
@@ -1170,5 +1180,6 @@ Phase 3: Security, QA & Integration (Aegis / Sentinel / Nexus)
 3. **Default Design Provider:** Which provider category should be the default first implementation for `DesignCapability` in V1: a multimodal LLM, an image-generation service, or a future design-service adapter?
 4. **Approval Granularity:** Should the human approval gate apply to each fidelity level (`LO_FI`, `MID_FI`, `HI_FI`) independently, or should the workflow require only a single final approval before downstream handoff?
 5. **Figma Integration Timing:** Should Nexus add a Figma-native write path as a second provider implementation later, or should the initial UX artifact pipeline remain entirely file-based and provider-agnostic?
+6. **Interactive CLI Interrupt Handling:** What should `ai-sdlc start`'s interactive loop (§12.1) do on Ctrl-C mid-session — leave the workflow paused at its current stage for a later `status`/`answer` to resume, or attempt a clean cancel? Is a non-interactive/CI mode (exiting at the first interrupt instead of prompting) needed alongside the interactive default, and if so what triggers it (a flag, or absence of a TTY)?
 
 ---
