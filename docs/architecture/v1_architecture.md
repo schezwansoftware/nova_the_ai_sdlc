@@ -12,7 +12,7 @@
 
 This document defines the production-grade V1 architecture for the enterprise **AI-Powered SDLC Automation Platform**.
 
-The platform operates as an orchestrated multi-agent network designed to convert human product requirements into validated, production-ready GitHub Pull Requests, Confluence documentation, and structured SDLC state artifacts.
+The platform operates as an orchestrated multi-agent network designed to convert human product requirements into validated, production-ready GitHub Pull Requests, Confluence documentation, and structured SDLC state artifacts. The architecture now formally incorporates a progressive UX design capability: the UX Agent produces a structured UX specification together with lo-fi, mid-fi, and hi-fi visual design artifacts that can be reviewed, approved, versioned, and handed to downstream implementation agents.
 
 ### Key Architectural Decisions
 
@@ -20,7 +20,9 @@ The platform operates as an orchestrated multi-agent network designed to convert
 - **Hub-and-Spoke Orchestration:** Agents operate under strict isolation. **Direct agent-to-agent communication is forbidden.** The Orchestrator (built on LangGraph by Orion) manages all state transitions, interruptions, and data passing using strict JSON contracts.
 - **Stable Public Orchestrator API Boundary:** Orion’s LangGraph graph implementation details, node names, and internal state structures are completely encapsulated behind a versioned, stable public API contract (`v1`). Clients (Core, Pixel, CLI) consume the public API exclusively.
 - **Durable File-Based State Machine:** Workflow state is maintained as schema-validated JSON files in `.ai-sdlc/`. Conversational history is ephemeral and treated purely as transport context; file-based state is the single source of truth.
-- **Decoupled AI Capability Abstraction:** Agents invoke abstract capabilities (e.g., `ReasoningCapability`, `CodingCapability`) rather than bound vendor APIs. Models are dynamically configurable and hot-swappable across OpenAI, Anthropic, and local/self-hosted instances.
+- **Decoupled AI Capability Abstraction:** Agents invoke abstract capabilities (e.g., `ReasoningCapability`, `CodingCapability`, `DesignCapability`) rather than bound vendor APIs. Models are dynamically configurable and hot-swappable across OpenAI, Anthropic, and local/self-hosted instances.
+- **Progressive UX Design as a First-Class Artifact:** The UX Agent produces structured UX specifications plus progressive visual design artifacts (lo-fi, mid-fi, hi-fi) that are persisted, versioned, reviewed, and handed to downstream engineering agents as a formal artifact package.
+- **Pluggable Visual Design Providers:** Visual design generation is implemented through a provider-agnostic design capability, not by hard-coding model vendors or design applications such as Figma. A Figma integration, if introduced later, is a distinct Nexus-owned provider implementation rather than the default architecture.
 - **CLI-First with API Boundary:** V1 delivers a local CLI interfacing directly with the platform engine via a local JSON-RPC / REST contract over IPC/HTTP, guaranteeing full GUI compatibility without refactoring core orchestration logic.
 
 ---
@@ -69,6 +71,7 @@ flowchart TD
         Reasoning["Reasoning Capability"]
         Coding["Coding Capability"]
         Retrieval["Retrieval / RAG Capability (Sage)"]
+        Design["Design Capability (pluggable visual design)"]
     end
 
     subgraph ToolLayer["7. Tool & Integration Layer (Nexus)"]
@@ -82,6 +85,7 @@ flowchart TD
     %% Storage & External Systems
     subgraph StorageLayer["8. State & Storage"]
         StateStore[".ai-sdlc/ JSON State Store"]
+        ArtifactStore["UX Artifact Store (.ai-sdlc/artifacts/ux)"]
         KnowledgeStore["Vector Store / RAG Index"]
     end
 
@@ -110,9 +114,11 @@ flowchart TD
     LangGraphEngine <-->|JSON Contract| Doc
 
     PO & UX & Arch & Dev & Test & Sec & Doc --> CapEngine
-    CapEngine --> Reasoning & Coding & Retrieval
+    CapEngine --> Reasoning & Coding & Retrieval & Design
     CapEngine <--> LLMExt
 
+    UX --> Design
+    Design --> ArtifactStore
     Retrieval <--> KnowledgeStore
 
     PO & UX & Arch & Dev & Test & Sec & Doc --> MCP
@@ -132,8 +138,9 @@ flowchart TD
 | ------------------------------------ | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- | -------------------------------------------------- | ---------------------------- | -------------------------- |
 | **Orchestrator API Facade**          | Public API Contract Boundary | Exposes strict, versioned facade functions (`start_workflow`, `get_workflow_status`, `submit_clarification`, `submit_approval`, `resume_workflow`, `cancel_workflow`). Decouples external consumers from LangGraph internals. | Standardized Pydantic Request Models               | Standardized Pydantic Response / Error Models      | Core State Engine, Pydantic  | **Orion / Core Interface** |
 | **Orchestrator Engine**              | SDLC State Machine           | Manages internal LangGraph nodes, state transitions, human interruptions, retries, and agent invocations.                                                                                                                     | Internal LangGraph commands, agent result payloads | Internal graph mutations, raw state checkpoints    | LangGraph, Core State Engine | **Orion**                  |
-| **State & Schema Engine**            | State Integrity              | Manages reading/writing JSON state files, enforcing Pydantic schemas, concurrency locks, and state restoration.                                                                                                               | Raw JSON payloads, file read/write requests        | Schema-validated Pydantic models, JSON state files | `pydantic`, `filelock`       | **Core**                   |
-| **Integration Adapter (MCP Engine)** | External Tool Gateway        | Exposes standardized tools (Git, Jira, Confluence, Filesystem) over Model Context Protocol (MCP) and native adapters.                                                                                                         | Tool call requests, integration credentials        | Standardized tool call execution results           | `mcp`, platform credentials  | **Nexus**                  |
+| **State & Schema Engine**            | State Integrity              | Manages reading/writing JSON state files, enforcing Pydantic schemas, concurrency locks, and state restoration. It also persists UX artifact manifests and binary design assets inside `.ai-sdlc/` without allowing specialist agents to write files directly. | Raw JSON payloads, file read/write requests        | Schema-validated Pydantic models, JSON state files, UX artifact references | `pydantic`, `filelock`       | **Core**                   |
+| **Integration Adapter (MCP Engine)** | External Tool Gateway        | Exposes standardized tools (Git, Jira, Confluence, Filesystem) over Model Context Protocol (MCP) and native adapters. Nexus can also surface provider-specific adapters for visual design services, but the UX contract remains provider-agnostic.                                                                                                         | Tool call requests, integration credentials        | Standardized tool call execution results           | `mcp`, platform credentials  | **Nexus**                  |
+| **Design Capability Adapter**        | Pluggable Visual Design Execution | Implements the `DesignCapability` abstraction (`capabilities/design.py`) plus its default/mock provider for the UX Agent, using the same seam-only pattern as `ReasoningCapability`. Real vendor/design-tool providers (including any future Figma provider) are separate implementations behind this seam, built and owned by whoever supplies that integration (e.g. **Nexus** for `integrations/design_provider.py`) — this row is the abstraction itself, not any specific provider. | Design request payloads, provider policy, artifact fidelity needs | Structured design artifacts, artifact metadata, provider response envelopes | Capability Router, provider SDKs | **Craft** |
 | **Knowledge Engine**                 | Context Assembly             | Performs hybrid RAG search across codebase, Jira, and Confluence to inject precise context into agent prompts.                                                                                                                | Query strings, semantic context scope              | Context bundles, metadata-attributed code snippets | Vector DB, embedding models  | **Sage**                   |
 | **Developer Runtime**                | Code Generation & Execution  | Interfaces with repo files, executes local builds/tests via CLI, interacts with GitHub Copilot CLI, and manages Git branches.                                                                                                 | Code modification specs, test commands             | Patch files, execution outputs, PR URLs            | Git CLI, subshell execution  | **Forge**                  |
 | **Agent Factory**                    | Specialist Instantiation     | Provides structural base classes and builders to generate specialist SDLC agents (PO, UX, Arch, Sec, Test).                                                                                                                   | Agent config, prompt templates, tools              | Executable specialist agent instances              | Capability Engine, Nexus     | **Craft**                  |
@@ -177,6 +184,88 @@ class BaseAgent(ABC, Generic[InSchema, OutSchema]):
         pass
 
 ```
+
+### UX Agent Contract (Reconciled with the Shipped UXOutputData)
+
+The shipped Craft UX agent implementation already exposes a tested, working output contract in `src/ai_sdlc/agents/ux/schemas.py` with text-only fields: `flow_title`, `summary`, `user_flows`, `screens`, and `accessibility_considerations`. The architecture preserves this contract by treating any UX visual-design additions as additive, optional fields rather than a breaking replacement.
+
+#### Input Contract (`UXAgentInput`)
+
+```json
+{
+  "workflow_id": "wf_123456789",
+  "initiator": "harshit.bhatt@org.com",
+  "requirements": {
+    "feature_title": "Order export",
+    "summary": "Users need to export their orders to CSV.",
+    "functional_requirements": [
+      "Export current view as CSV",
+      "Show progress indicator while export runs"
+    ]
+  },
+  "project_context": {
+    "repository_name": "order-service",
+    "detected_tech_stack": ["TypeScript", "React"]
+  },
+  "architecture_context": {
+    "screen_candidates": ["OrdersPage", "ExportDialog"],
+    "navigation_notes": ["Export is available from the orders toolbar"]
+  },
+  "previous_designs": []
+}
+```
+
+#### Output Contract (`UXAgentOutput`)
+
+```json
+{
+  "success": true,
+  "status_code": "COMPLETED",
+  "data": {
+    "flow_title": "Export orders to CSV",
+    "summary": "Users can export their current order list to CSV from the Orders page.",
+    "user_flows": [
+      "User opens the Orders page and clicks Export",
+      "The system shows progress, then downloads the export file"
+    ],
+    "screens": [
+      "OrdersPage",
+      "ExportDialog",
+      "ExportSuccessState"
+    ],
+    "accessibility_considerations": [
+      "Export action must be keyboard reachable",
+      "Progress and success states must be announced to assistive technology"
+    ],
+    "ux_specification": {
+      "user_personas": ["Operations Manager"],
+      "navigation": [{"from": "OrdersPage", "to": "ExportDialog"}],
+      "components": ["Export button", "Progress indicator", "Success toast"],
+      "states": ["loading", "empty", "success", "error"],
+      "validation": ["Export file name must be human-readable"]
+    },
+    "visual_designs": {
+      "lo_fi": [
+        {
+          "artifact_id": "ux-art-001",
+          "fidelity": "LO_FI",
+          "status": "DRAFT",
+          "screen_refs": ["OrdersPage"],
+          "artifact_ref": ".ai-sdlc/artifacts/ux/ux-art-001/payload.png",
+          "mime_type": "image/png"
+        }
+      ],
+      "mid_fi": [],
+      "hi_fi": []
+    },
+    "design_package_status": "DRAFT"
+  },
+  "clarification_message": null,
+  "error_message": null
+}
+```
+
+The additive fields are optional. Existing consumers that ignore them continue to work because the original shipped schema remains valid. If a future implementation requires a breaking change to the shipped contract, it must be treated as a migration event and explicitly documented.
 
 ### Agent Contract Example (PO Agent)
 
@@ -288,6 +377,12 @@ class WorkflowPhase(str, Enum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+
+# NOTE: `UX_DESIGN` is part of the public workflow vocabulary for future graph
+# expansion, but the current Orion runtime still uses a free-string stage model
+# and does not yet execute a live UX_DESIGN node. The architecture therefore
+# treats UX_DESIGN as an aspirational/doc-only phase until the orchestrator is
+# extended to execute it.
 
 class WorkflowStatusType(str, Enum):
     RUNNING = "RUNNING"
@@ -529,14 +624,67 @@ State is decoupled from conversation history. The durable single source of truth
 .ai-sdlc/
 ├── workflow.json         # Orchestrator execution state & history
 ├── requirements.json     # PO Agent state
-├── ux.json               # UX Agent state (wireframes, user flows)
+├── ux.json               # UX Agent state (structured UX spec + artifact manifest)
 ├── architecture.json     # Technical Architecture Agent state
 ├── implementation.json   # Developer Agent state (changed files, patches)
 ├── testing.json          # Test suites and execution results
 ├── security.json         # Security audit & SAST scan results
-└── pr.json               # Final Pull Request payload and links
+├── pr.json               # Final Pull Request payload and links
+└── artifacts/
+    └── ux/               # Persisted UX design artifacts and their binary payloads
+        └── {artifact_id}/
+            ├── metadata.json
+            └── payload.*
 
 ```
+
+### UX Artifact Persistence Model
+
+UX design artifacts are not written by specialist agents. Instead, the UX Agent returns a structured result containing artifact references and metadata. The Orchestrator/Core persist those artifacts durably in `.ai-sdlc/artifacts/ux/` and update `ux.json` to reference them. This keeps the agent stateless while preserving durable artifact storage for downstream handoff.
+
+Each artifact entry stores:
+
+- `artifact_id`: stable identifier for the design artifact.
+- `fidelity`: `LO_FI`, `MID_FI`, or `HI_FI`.
+- `version`: monotonic revision number.
+- `status`: `DRAFT`, `APPROVED`, `REJECTED`, `SUPERSEDED`.
+- `screen_refs` / `flow_refs`: identifiers linking the artifact to a screen/flow/spec block.
+- `artifact_ref`: relative path to the persisted payload in `.ai-sdlc/artifacts/ux/`.
+- `mime_type`: content type (`image/png`, `application/json`, etc.).
+- `parent_artifact_id`: optional pointer to the previous revision for history.
+
+The artifact manifest in `ux.json` is the authoritative pointer list; the files in `.ai-sdlc/artifacts/ux/` are the durable payloads.
+
+### UX Revision & Feedback Loop
+
+Rejection and revision reuse the Orchestrator's existing, already-implemented approval mechanism rather than introducing a UX-specific one: `submit_approval(approved=false, feedback="...")` (Public API) → `Orchestrator.resume_workflow_after_approval(..., decision="rejected", feedback=...)` (`src/ai_sdlc/orchestration/orchestrator.py`, real code today). This is the same code path PO/Architecture approvals already use.
+
+For a UX artifact specifically:
+
+1. A human rejects a `DRAFT`/`IN_REVIEW` artifact via the standard approval endpoint, supplying `feedback`. The artifact's `status` becomes `REJECTED`; it is never mutated or deleted.
+2. The Orchestrator re-invokes the UX Agent for the same stage, passing the reviewer's `feedback` forward as an additional input field (`request.inputs["revision_feedback"]`), alongside the original `requirements`/`architecture_context` — the same "merge accumulated `wf.inputs` into the next request" mechanism `invoke_agent_for_stage` already uses for clarification answers.
+3. The UX Agent produces a new artifact version at the same or a higher fidelity level, with `parent_artifact_id` pointing at the rejected artifact, `version` incremented, and `status` starting at `DRAFT` again.
+4. Once a human approves an artifact, its `status` becomes `APPROVED` and it is treated as immutable; any further change is a new artifact version with a new `parent_artifact_id`, never an in-place edit of an approved payload (see "Visual Artifact Drift" risk below).
+
+Approval granularity (per-fidelity-level vs. one final approval) is intentionally left open — see Open Questions.
+
+### UX → Developer Agent Handoff Contract
+
+The Developer Agent does not receive the full `ux.json` artifact history — only the subset that has cleared human review, so it can never build against a draft or rejected design by mistake:
+
+```text
+UX Artifact Package (constructed by Core from ux.json, passed to the Developer Agent)
+├── ux_specification            # the `ux_specification` object from ux.json, as-is
+├── approved_artifacts[]        # only artifacts with status == "APPROVED", highest version per screen/flow
+│   ├── artifact_id
+│   ├── fidelity                # typically HI_FI, but whatever fidelity was actually approved
+│   ├── screen_refs / flow_refs
+│   ├── artifact_ref            # path into .ai-sdlc/artifacts/ux/
+│   └── mime_type
+└── design_package_status       # must equal "APPROVED" for this package to be handed off at all
+```
+
+If `design_package_status` is not `APPROVED`, Core does not construct or hand off a package — the Developer Agent stage cannot begin. This mirrors the existing rule that the Orchestrator only advances past a `WAITING_FOR_APPROVAL` stage once a decision is recorded, not before.
 
 ### Primary Schemas
 
@@ -626,7 +774,48 @@ State is decoupled from conversation history. The durable single source of truth
 }
 ```
 
-#### 3. `architecture.json` Schema
+#### 3. `ux.json` Schema
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": { "type": "integer" },
+    "workflow_id": { "type": "string" },
+    "design_package_status": {
+      "type": "string",
+      "enum": ["DRAFT", "IN_REVIEW", "APPROVED", "REJECTED", "SUPERSEDED"]
+    },
+    "current_fidelity": {
+      "type": "string",
+      "enum": ["LO_FI", "MID_FI", "HI_FI"]
+    },
+    "ux_specification": { "type": "object" },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "artifact_id": { "type": "string" },
+          "fidelity": { "type": "string" },
+          "version": { "type": "integer" },
+          "status": { "type": "string" },
+          "screen_refs": { "type": "array", "items": { "type": "string" } },
+          "flow_refs": { "type": "array", "items": { "type": "string" } },
+          "artifact_ref": { "type": "string" },
+          "mime_type": { "type": "string" },
+          "parent_artifact_id": { "type": ["string", "null"] }
+        },
+        "required": ["artifact_id", "fidelity", "version", "status", "artifact_ref"]
+      }
+    }
+  },
+  "required": ["version", "workflow_id", "design_package_status", "ux_specification"]
+}
+```
+
+#### 4. `architecture.json` Schema
 
 ```json
 {
@@ -701,7 +890,10 @@ State is decoupled from conversation history. The durable single source of truth
 1. **GitHub Adapter:** Uses GitHub MCP for remote PR generation, branch locking, and issue sync. Uses native Git CLI locally for rapid branch creation, commits, and diff calculation.
 2. **Jira Adapter:** MCP-backed tool providing issue creation, status transition (`In Progress`, `Under Review`), and comment updates.
 3. **Confluence Adapter:** MCP-backed tool for auto-generating architecture decision records (ADRs) and feature design pages.
-4. **Filesystem & Terminal Engine:** Native Python OS module with tight sandboxing (`chroot` lock to workspace root) ensuring agents cannot modify files outside target repo boundaries.
+4. **Design Provider Adapter:** A provider-agnostic Nexus integration that can call multimodal LLMs, image-generation services, or future design-tool APIs to generate or refine UX design artifacts. It is implemented behind `DesignCapability` and never exposes vendor-specific APIs directly to the UX Agent.
+5. **Filesystem & Terminal Engine:** Native Python OS module with tight sandboxing (`chroot` lock to workspace root) ensuring agents cannot modify files outside target repo boundaries.
+
+For V1, visual design generation means a provider-backed AI capability that produces design assets and metadata. A direct Figma file integration is deliberately not the default architecture; if introduced later, it should be modeled as a separate provider implementation of `DesignCapability` owned by Nexus.
 
 ---
 
@@ -710,10 +902,10 @@ State is decoupled from conversation history. The durable single source of truth
 The system decouples **Agents**, **Capabilities**, and **LLM Models** to prevent vendor lock-in.
 
 ```
-Agent Layer               PO Agent / Developer Agent / Security Agent
+Agent Layer               PO Agent / UX Agent / Developer Agent / Security Agent
                                          │
                                          ▼
-Capability Layer     [ Reasoning ]  [ Coding ]  [ Retrieval ]
+Capability Layer  [ Reasoning ] [ Coding ] [ Retrieval ] [ Design ]
                                          │
                                          ▼
 Capability Router    Fallback & Guardrail Validation Layer
@@ -724,6 +916,8 @@ Model Layer     Anthropic             OpenAI               Local / Ollama
               (Claude 3.5)          (GPT-4o)             (DeepSeek / Llama)
 
 ```
+
+`DesignCapability` is a new capability abstraction used by the UX Agent when it needs to generate or refine visual design artifacts. It is intentionally provider-agnostic and may be implemented by a multimodal LLM, an image-generation provider, or a design-service adapter. The Capability Router resolves the request to the best available provider, applies policy guards, and may fall back to a secondary provider if the preferred provider is unavailable or rate-limited. The UX Agent contract remains stable because the capability interface exposes a normalized request/response envelope rather than vendor-specific APIs.
 
 ---
 
@@ -747,6 +941,9 @@ Model Layer     Anthropic             OpenAI               Local / Ollama
 - System prompts are strictly separated from user data frames inside JSON structures.
 
 - **Tool Sandboxing:** Terminal command execution by **Forge** is strictly limited to an explicitly allowed command list (`git`, `mvn`, `gradle`, `npm`, `pytest`). Destructive commands (`rm -rf /`, raw network sockets, elevation commands like `sudo`) are explicitly blocked.
+- **Design Artifact Validation:** Generated visual artifacts are validated before persistence to confirm they are of the expected type, size, hashable payload, and free of embedded secrets or malicious payloads. Invalid artifacts are rejected and not inserted into the approved artifact set.
+- **Provider Credential Handling:** Design providers are accessed through Nexus-owned adapters that read credentials from the secure secret vault; the UX Agent never receives raw credentials or provider-specific connection details.
+- **Prompt & Input Sanitization:** Prompt payloads sent to the design provider are sanitized to remove secrets, prompt-injection payloads, and repository content that should not leave the workspace without approval.
 - **Secrets Redaction:** Regex mask filters intercept outbound agent execution trace logs, redacting API tokens, keys, and credentials before writing to `.ai-sdlc/` or stdout.
 
 ---
@@ -785,12 +982,14 @@ ai-sdlc-platform/
 │   │   ├── router.py
 │   │   ├── reasoning.py
 │   │   ├── coding.py
-│   │   └── retrieval.py
+│   │   ├── retrieval.py
+│   │   └── design.py
 │   ├── integrations/       # (Nexus) External Tools & MCP
 │   │   ├── mcp_host.py
 │   │   ├── github.py
 │   │   ├── jira.py
-│   │   └── confluence.py
+│   │   ├── confluence.py
+│   │   └── design_provider.py
 │   ├── knowledge/          # (Sage) RAG & Context Engine
 │   │   ├── indexer.py
 │   │   └── retriever.py
@@ -839,16 +1038,18 @@ All agent actions, LLM calls, tool executions, public API invocations, and state
 ## 15. Testing Strategy
 
 1. **Public Contract Tests:** Validate that `start_workflow()`, `get_workflow_status()`, etc., maintain strict compliance with Pydantic `v1` schemas regardless of Orion internal graph changes.
-2. **Unit Tests:** Core state parsing and JSON validation.
-3. **Agent Evaluation Tests (Sentinel):** Enforce structural LLM outputs and code quality benchmarks.
+2. **Unit Tests:** Core state parsing and JSON validation, including `.ai-sdlc/ux.json` artifact-manifest schema validation.
+3. **Agent Evaluation Tests (Sentinel):** Enforce structural LLM outputs and code quality benchmarks, including compatibility with the shipped `UXOutputData` fields plus additive optional visual-artifact fields.
+4. **UX Artifact Lifecycle Tests:** Validate that design artifacts transition through `DRAFT -> APPROVED/SUPERSEDED/REJECTED` without the UX Agent writing files directly, and that downstream agents only consume approved artifact references.
+5. **Provider Independence Tests:** Verify that the UX Agent contract remains unchanged when different `DesignCapability` implementations are swapped in.
 
 ---
 
 ## 16. MVP Scope
 
 - **Must Have:** Public Orchestrator API (`v1`), CLI interface, Orion LangGraph runner, file-backed `.ai-sdlc/` state, PO/Arch/Dev/Testing agents, local Git + GitHub PR integration.
-- **Should Have:** UX/Security/Documentation agents, Jira/Confluence MCP adapters.
-- **Later:** Pixel Web GUI, multi-user workflow permissions.
+- **Should Have:** UX Agent contract extension for structured UX + visual artifacts, `.ai-sdlc/ux.json` artifact manifest support, approval/revision workflow for UX design packages, and a pluggable `DesignCapability` with at least one provider implementation.
+- **Later:** Direct Figma file synchronization, advanced multi-provider fallback strategies, and full visual-editing workflows beyond the artifact handoff model.
 
 ---
 
@@ -858,13 +1059,18 @@ All agent actions, LLM calls, tool executions, public API invocations, and state
 Phase 1: Public API & State Foundation (Atlas / Core / Orion)
    ├── Implement Public Orchestrator API Schemas (v1)
    ├── Define Pydantic State Schemas (.ai-sdlc/)
+   ├── Add UX artifact persistence and approval state to the workflow model
    └── Connect Public Facade to Orion's LangGraph Execution Engine
 
 Phase 2: Specialist Agents & Capabilities (Craft / Sage / Forge)
-   ├── Implement PO Agent & Architecture Agent
-   └── Implement Developer Agent (Forge) + Git CLI Sandbox
+   ├── Implement/extend the UX Agent contract with additive visual-artifact fields
+   ├── Introduce `DesignCapability` and a first provider adapter (multimodal or image-provider based)
+   ├── Implement the UX review/revision loop and approval semantics
+   └── Implement Developer Agent handoff to the approved UX artifact package
 
 Phase 3: Security, QA & Integration (Aegis / Sentinel / Nexus)
+   ├── Integrate design-provider credentials via Nexus adapters
+   ├── Enforce artifact validation, prompt sanitization, and observability
    └── Integrate GitHub PR API Adapter & Aegis Sanitizer
 
 ```
@@ -882,6 +1088,11 @@ Phase 3: Security, QA & Integration (Aegis / Sentinel / Nexus)
 
 - **Reason:** Plain, schema-validated JSON files are human-readable, trackable via Git, easy to debug, transparent to developers, and require no complex database setup.
 
+### Decision 3: Pluggable `DesignCapability` for Progressive UX Artifacts
+
+- **Reason:** Visual design generation is treated as a capability, not a direct dependency of the UX Agent on a model vendor or design platform. This keeps the agent contract stable while allowing multimodal models, image-generation services, or future design-tool adapters to supply lo-fi/mid-fi/hi-fi artifacts.
+- **Alternatives Rejected:** Hard-coding one specific image model directly inside `ux_agent.py` (rejected because it would break vendor independence and make provider swaps difficult), and treating Figma as the only source of truth for UX artifacts (rejected for V1 because it conflates AI generation with native design-tool editing and would add an unnecessary integration dependency).
+
 ---
 
 ## 19. Risks and Mitigation Strategies
@@ -890,6 +1101,8 @@ Phase 3: Security, QA & Integration (Aegis / Sentinel / Nexus)
 | --------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **API Boundary Leakage** (Internal LangGraph exceptions leaking to public caller) | High     | Public Facade catches all internal execution errors and translates them into structured `APIErrorDetail` responses with `INTERNAL_ORCHESTRATION_ERROR` codes. |
 | **Agent Infinite Loops**                                                          | High     | Orion enforces a strict retry limit per phase. When exceeded, the Public API reports `WAITING_FOR_CLARIFICATION` or `FAILED` status.                          |
+| **Visual Artifact Drift**                                                         | Medium   | Approved UX artifacts are versioned and immutable once approved. Subsequent revisions create new artifact versions and supersede older ones without mutating the approved payload. |
+| **Provider Lock-In**                                                              | Medium   | The UX Agent depends on `DesignCapability`, not a vendor API. A provider swap only changes the adapter behind the capability, not the agent contract.         |
 
 ---
 
@@ -897,5 +1110,8 @@ Phase 3: Security, QA & Integration (Aegis / Sentinel / Nexus)
 
 1. **Jira Lifecycle Policy:** Should the platform automatically transition existing Jira tickets during workflow progress, or only create/comment on tickets upon explicit human approval?
 2. **Copilot CLI Integration Scope:** Should **Forge** interact with GitHub Copilot strictly via Copilot CLI subprocess calls, or fall back to direct LLM provider API invocations when Copilot CLI is unavailable locally?
+3. **Default Design Provider:** Which provider category should be the default first implementation for `DesignCapability` in V1: a multimodal LLM, an image-generation service, or a future design-service adapter?
+4. **Approval Granularity:** Should the human approval gate apply to each fidelity level (`LO_FI`, `MID_FI`, `HI_FI`) independently, or should the workflow require only a single final approval before downstream handoff?
+5. **Figma Integration Timing:** Should Nexus add a Figma-native write path as a second provider implementation later, or should the initial UX artifact pipeline remain entirely file-based and provider-agnostic?
 
 ---

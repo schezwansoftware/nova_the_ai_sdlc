@@ -56,6 +56,11 @@ _RISK_KEYWORDS = (
     "scale", "complex", "migration", "dependency",
 )
 
+_A11Y_KEYWORDS = (
+    "accessib", "keyboard", "screen reader", "screen-reader", "contrast",
+    "aria", "wcag", "a11y",
+)
+
 _TECH_TOKENS = (
     "Python", "FastAPI", "Django", "Flask", "Node", "TypeScript",
     "JavaScript", "React", "Vue", "Angular", "Java", "Spring", "Kotlin",
@@ -234,6 +239,24 @@ class MockReasoningProvider(ReasoningCapability):
             if matches:
                 return [f"Risk: {s}." for s in matches[:5]]
             return ["Risk: requirement scope may expand once implementation begins."]
+
+        if "flow" in lname:
+            matches = [s for s in sentences if _match_any(s, _ACTION_VERBS)]
+            basis = matches or sentences
+            return [f"User flow: {s}." for s in basis[:5]] or ["User flow: complete the primary task described in the requirement."]
+
+        if "screen" in lname:
+            basis = sentences[:5] or ["primary view"]
+            return [f"Screen to support: {s}." for s in basis]
+
+        if "accessib" in lname:
+            matches = [s for s in sentences if _match_any(s, _A11Y_KEYWORDS)]
+            if matches:
+                return [f"Accessibility: {s}." for s in matches[:5]]
+            return [
+                "Ensure all interactive elements are keyboard-navigable.",
+                "Ensure sufficient color contrast and screen-reader labeling for new UI elements.",
+            ]
 
         # generic fallback
         return sentences[:5] or [f"Derived {lname.replace('_', ' ')} item."]
