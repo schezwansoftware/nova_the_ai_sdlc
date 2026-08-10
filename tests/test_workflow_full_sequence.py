@@ -222,6 +222,63 @@ def test_approval_mid_sequence_resumes_and_completes_workflow(tmp_path):
     assert wf_final.inputs.get("ux_design") == {"stage": "ux", "resolved": True}
 
 
+def test_clarification_on_first_node_resolves_instead_of_looping_forever(tmp_path):
+    """Regression test for the bug documented in `todo.md`: a workflow's
+    *first* node (PO) requesting its own clarification used to be
+    unresolvable through the real public API -- `submit_clarification()`
+    would return `success: true` but the workflow came right back with a
+    new `question_id` and the exact same question, forever, because PO's
+    `_effective_text` preferred `requirement_text` (never cleared by Orion
+    on resume) over the user's `clarification_answer`. Drives this through
+    `start_workflow`/`submit_clarification` only -- no stub agent -- to
+    prove the real PO agent's ambiguity heuristic and Orion's resume
+    semantics now cooperate correctly."""
+    api = _make_api(tmp_path)
+    api.orch.register_agent("po", POAgent())
+    api.orch.register_agent("architecture", ArchitectureAgent())
+    api.orch.register_agent("ux", UXAgent())
+
+    resp = api.start_workflow(
+        StartWorkflowRequest(
+            initiator_id="u5", raw_requirement="TBD, not sure yet, figure out later.", project_context={}
+        )
+    )
+    assert resp.success, resp.error
+    workflow_id = resp.data.workflow_id
+    assert resp.data.status == WorkflowStatusType.WAITING_FOR_CLARIFICATION
+    assert resp.data.current_phase == WorkflowPhase.REQUIREMENTS
+
+    status_resp = api.get_workflow_status(GetWorkflowStatusRequest(workflow_id=workflow_id))
+    first_question_id = status_resp.data.pending_action.interaction_id
+
+    clar_resp = api.submit_clarification(
+        SubmitClarificationRequest(
+            workflow_id=workflow_id,
+            initiator_id="u5",
+            question_id=first_question_id,
+            response_text=(
+                "Add support for Redis caching to our order service to reduce "
+                "DB load under high traffic. The system must respond within "
+                "50ms for cached hits."
+            ),
+        )
+    )
+    assert clar_resp.success, clar_resp.error
+
+    # The bug: this would come back WAITING_FOR_CLARIFICATION again, on the
+    # same "requirements" phase, with a brand-new question_id but the
+    # identical question -- an infinite loop. Fixed: PO accepts the answer
+    # and the graph advances all the way through Architecture/UX.
+    assert clar_resp.data.status == WorkflowStatusType.COMPLETED
+    assert clar_resp.data.current_phase == WorkflowPhase.COMPLETED
+
+    wf_final = api.orch.load_workflow(workflow_id)
+    assert wf_final.stages.get("requirements") == "completed"
+    assert wf_final.stages.get("architecture") == "completed"
+    assert wf_final.stages.get("ux_design") == "completed"
+    assert wf_final.pending_clarification is None
+
+
 def test_approval_rejection_mid_sequence_does_not_advance_past_interrupted_node(tmp_path):
     api = _make_api(tmp_path)
     api.orch.register_agent("po", POAgent())

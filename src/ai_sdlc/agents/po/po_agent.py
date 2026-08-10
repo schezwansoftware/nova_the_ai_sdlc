@@ -60,21 +60,27 @@ class POAgent(SpecialistAgent):
     def _effective_text(inputs: Dict[str, Any]) -> str:
         """The requirement text this invocation should reason over.
 
-        Normally this is just `inputs["requirement_text"]`. But when Orion
-        resumes this agent after a clarification round
-        (`resume_workflow_after_clarification` /
-        `LangGraphRunner.resume_after_clarification`), the request carries
-        `clarification_answer` instead of the original `requirement_text`
-        (the Orchestrator does not currently re-inject prior stage inputs on
-        resume). Falling back to the clarification answer lets a
-        clarification round actually resolve ambiguity rather than looping
-        forever on "no requirement text provided" -- this is a PO Agent
-        input-handling decision, not a change to Orchestrator behavior.
+        On a fresh call this is just `inputs["requirement_text"]`. On a
+        resume after a clarification round, `inputs["clarification_answer"]`
+        holds the user's latest answer and must take precedence over it --
+        `wf.inputs` is cumulative and never clears `requirement_text` on
+        resume (it's set once at `start_workflow` for the whole workflow,
+        not per-node), so it is *still present, unchanged* on the resumed
+        call. Preferring it unconditionally, as this used to, meant
+        `check_needs_clarification` kept re-evaluating the same original
+        (still-ambiguous) text every round regardless of what the user
+        answered -- an unresolvable loop for any requirement PO's own
+        ambiguity heuristic flags on the very first call. Preferring
+        `clarification_answer` whenever present fixes that: PO is only ever
+        invoked once-then-resumed in this graph (it never runs again after
+        the workflow advances past `requirements`), so a present
+        `clarification_answer` unambiguously means "this call is my own
+        resume," never a later node's leftover state.
         """
-        text = (inputs.get("requirement_text") or "").strip()
-        if text:
-            return text
-        return (inputs.get("clarification_answer") or "").strip()
+        clarification_answer = (inputs.get("clarification_answer") or "").strip()
+        if clarification_answer:
+            return clarification_answer
+        return (inputs.get("requirement_text") or "").strip()
 
     def check_needs_clarification(self, request: AgentRequest) -> Optional[str]:
         inputs: Dict[str, Any] = request.inputs or {}

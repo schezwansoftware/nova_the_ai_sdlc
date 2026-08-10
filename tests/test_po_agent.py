@@ -76,6 +76,42 @@ def test_vagueness_marker_triggers_clarification_even_if_long_enough():
     assert result.questions
 
 
+def test_clarification_answer_resolves_ambiguity_even_though_requirement_text_is_still_present():
+    """Regression test for the bug documented in todo.md: `wf.inputs` is
+    cumulative and Orion never clears `requirement_text` on resume (it's a
+    whole-workflow input set once at `start_workflow`, not per-node), so a
+    resumed request's `inputs` dict carries *both* the original
+    `requirement_text` (still the same ambiguous string) and the new
+    `clarification_answer` -- exactly like `LangGraphRunner.
+    resume_after_clarification` actually sends it. The agent must use the
+    answer, not keep re-deciding based on the stale original text (which
+    would ask the identical question forever)."""
+    agent = POAgent()
+    ambiguous_request = _make_request({"requirement_text": "TBD, not sure yet, figure out later."})
+    first = agent.execute(ambiguous_request)
+    assert first.status == AgentStatus.NEEDS_CLARIFICATION
+
+    resumed_request = _make_request(
+        {
+            # Both present simultaneously, as a real resume sends it --
+            # requirement_text is never cleared.
+            "requirement_text": "TBD, not sure yet, figure out later.",
+            "clarification_answer": (
+                "Add support for Redis caching to our order service to reduce "
+                "DB load under high traffic. The system must respond within "
+                "50ms for cached hits."
+            ),
+        }
+    )
+
+    second = agent.execute(resumed_request)
+
+    assert second.status == AgentStatus.COMPLETED
+    assert second.data is not None
+    validated = POAgentOutputData(**second.data)
+    assert validated.feature_title
+
+
 def test_force_clarify_hook():
     agent = POAgent()
     request = _make_request({"requirement_text": "Add export feature", "force": "clarify"})
