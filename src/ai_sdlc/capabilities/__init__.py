@@ -9,12 +9,17 @@ selected/configured elsewhere (out of scope for Craft; see
 `providers/base.py` / `providers/design_base.py` for the provider-facing
 contracts a future real vendor client would implement).
 
-For V1/MVP, the only implementations available are the fully
-deterministic, network-free `MockReasoningProvider` (see
-`providers/mock.py`) and `MockDesignProvider` (see
-`providers/design_mock.py`), which are sufficient to prove both
-abstraction boundaries and to keep the test suite runnable without
-external credentials.
+For V1/MVP, the fully deterministic, network-free `MockReasoningProvider`
+(see `providers/mock.py`) and `MockDesignProvider` (see
+`providers/design_mock.py`) remain the hard default everywhere, which
+keeps the test suite runnable without external credentials. A real
+`ReasoningCapability` provider now also exists --
+`providers/reasoning_anthropic.py`'s `AnthropicReasoningProvider`, backed
+by the Anthropic Messages API -- selected in favor of the mock only when a
+workspace explicitly opts in (`providers/reasoning_factory.py`,
+`AI_SDLC_REASONING_PROVIDER=anthropic`); every agent still only ever
+depends on the `ReasoningCapability` interface, never this or any other
+concrete provider directly.
 
 Note: `ReasoningCapability`, `DesignCapability`, `CodingCapability`, and
 `RetrievalCapability` each define their own `ProviderError`/

@@ -7,9 +7,12 @@ functional requirements are derived from imperative-sounding sentences in
 the input text, non-functional requirements from sentences containing
 performance/security/reliability keywords, and so on.
 
-This is the only `ReasoningCapability` implementation Craft ships for V1.
-Real vendor providers are explicitly out of scope here (see
-`providers/base.py`) and can be added later without any agent code
+This remains the hard default `ReasoningCapability` implementation --
+every test, CI run, and any workspace that hasn't explicitly configured a
+real provider gets this, never a live model call (see
+`providers/reasoning_factory.py`). A real provider now also exists
+(`providers/reasoning_anthropic.py`'s `AnthropicReasoningProvider`,
+backed by the Anthropic Messages API), added without any agent code
 changing, because agents only ever depend on `ReasoningCapability`.
 
 Test hooks (documented, not a hidden hack):

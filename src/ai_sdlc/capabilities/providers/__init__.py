@@ -4,13 +4,20 @@
 Deterministic, network-free mock providers are implemented here for all
 four capabilities: `mock.py` (`MockReasoningProvider`), `design_mock.py`
 (`MockDesignProvider`), `coding_mock.py` (`MockCodingProvider`), and
-`retrieval_mock.py` (`MockRetrievalProvider`). Real vendor providers for
-Reasoning/Design (OpenAI, Anthropic, Bedrock, Ollama, multimodal/image-
-generation services, design-tool adapters such as a future Nexus-owned
-Figma integration, ...) are explicitly out of scope for Craft and are
-deferred to be added later behind the `ReasoningProvider` (`base.py`) /
-`DesignProvider` (`design_base.py`) protocols, without any change
-required to agent code.
+`retrieval_mock.py` (`MockRetrievalProvider`). These remain the hard
+default everywhere nothing has been explicitly configured (every test,
+CI, and any workspace that hasn't opted in -- see `reasoning_factory.py`).
+
+`reasoning_anthropic.py` (`AnthropicReasoningProvider`) is
+`ReasoningCapability`'s real V1 provider, backed by the Anthropic
+Messages API's forced tool-use structured output -- selected over the
+mock via `reasoning_factory.get_default_reasoning_provider()` when a
+workspace sets `AI_SDLC_REASONING_PROVIDER=anthropic`. Real
+`DesignCapability` providers (OpenAI/other multimodal/image-generation
+services, design-tool adapters such as a future Nexus-owned Figma
+integration, ...) remain out of scope for Craft and are deferred to be
+added later behind the `DesignProvider` (`design_base.py`) protocol,
+without any change required to agent code.
 
 `CodingCapability` and `RetrievalCapability` are different: harnessing a
 real agentic coding tool *is* both capabilities' V1 scope (section 18
