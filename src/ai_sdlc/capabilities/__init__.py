@@ -16,13 +16,15 @@ deterministic, network-free `MockReasoningProvider` (see
 abstraction boundaries and to keep the test suite runnable without
 external credentials.
 
-Note: `ReasoningCapability`, `DesignCapability`, and `CodingCapability`
-each define their own `ProviderError`/`MalformedResponseError` classes
-(not shared) so each capability's failure contract stays self-contained;
-callers that need more than one (e.g. the UX Agent needs Reasoning +
-Design; the Developer Agent needs Reasoning + Coding, per section 8's
-Tier 3) import each pair from its own module rather than from this
-package's re-exports, to avoid ambiguity between them.
+Note: `ReasoningCapability`, `DesignCapability`, `CodingCapability`, and
+`RetrievalCapability` each define their own `ProviderError`/
+`MalformedResponseError` classes (not shared) so each capability's
+failure contract stays self-contained; callers that need more than one
+(e.g. the UX Agent needs Reasoning + Design; the Developer Agent needs
+Reasoning + Coding, per section 8's Tier 3; Architecture/Review/
+Documentation need Reasoning + Retrieval, per Tier 2) import each pair
+from its own module rather than from this package's re-exports, to avoid
+ambiguity between them.
 """
 from __future__ import annotations
 
@@ -37,6 +39,9 @@ from ai_sdlc.capabilities.reasoning import (
     ProviderError,
     ReasoningCapability,
 )
+from ai_sdlc.capabilities.retrieval import MalformedResponseError as RetrievalMalformedResponseError
+from ai_sdlc.capabilities.retrieval import ProviderError as RetrievalProviderError
+from ai_sdlc.capabilities.retrieval import RetrievalCapability
 
 __all__ = [
     "ReasoningCapability",
@@ -48,4 +53,7 @@ __all__ = [
     "CodingCapability",
     "CodingProviderError",
     "CodingMalformedResponseError",
+    "RetrievalCapability",
+    "RetrievalProviderError",
+    "RetrievalMalformedResponseError",
 ]
