@@ -2,7 +2,12 @@
 `github-copilot-sdk` extra isn't installed -- the module itself must
 still import cleanly (so it can appear in test collection / be imported
 by anything that enumerates available providers), and only fail with a
-clear, actionable error at `CopilotCodingProvider()` construction time.
+clear, actionable `ProviderError` at `CopilotCodingProvider()`
+construction time -- mirroring `claude_sdk.py`'s own convention of
+raising `ProviderError` immediately from `__init__` when its SDK isn't
+usable, rather than a bare `ImportError`, so callers that already know to
+catch `CodingCapability`'s documented failure contract don't need a
+second exception type just for "provider unavailable".
 
 This test is meaningful in *either* environment:
   - Extra absent: exercises the real guard path.
@@ -16,14 +21,16 @@ import importlib
 
 import pytest
 
+from ai_sdlc.capabilities.coding import ProviderError
+
 
 def test_module_imports_regardless_of_sdk_availability():
     module = importlib.import_module("ai_sdlc.capabilities.providers.coding_copilot")
     assert hasattr(module, "CopilotCodingProvider")
 
 
-def test_constructor_raises_clear_error_when_sdk_unavailable(monkeypatch):
+def test_constructor_raises_provider_error_when_sdk_unavailable(monkeypatch):
     module = importlib.import_module("ai_sdlc.capabilities.providers.coding_copilot")
     monkeypatch.setattr(module, "_COPILOT_SDK_IMPORT_ERROR", ImportError("simulated: not installed"))
-    with pytest.raises(ImportError, match="github-copilot-sdk is not installed"):
+    with pytest.raises(ProviderError, match="github-copilot-sdk is not usable"):
         module.CopilotCodingProvider()
