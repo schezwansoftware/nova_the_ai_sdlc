@@ -24,6 +24,16 @@ dependencies = [
 # that the Copilot provider is unavailable on 3.10.
 copilot = ["github-copilot-sdk>=1.0.9"]
 
+# The real Anthropic ReasoningCapability provider
+# (capabilities/providers/reasoning_anthropic.py). Optional because the
+# mock provider is the hard default everywhere (see
+# capabilities/providers/reasoning_factory.py) and most environments
+# (including this project's own test suite) never need a live model
+# client at all. Verified installable/importable on this project's own
+# `requires-python` floor (>=3.10) -- no version-floor conflict the way
+# `copilot` above has.
+anthropic = ["anthropic>=0.121.0"]
+
 [project.scripts]
 ai-sdlc = "ai_sdlc.cli.main:app"
 
