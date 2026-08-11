@@ -24,6 +24,7 @@ The platform operates as an orchestrated multi-agent network designed to convert
 - **Progressive UX Design as a First-Class Artifact:** The UX Agent produces structured UX specifications plus progressive visual design artifacts (lo-fi, mid-fi, hi-fi) that are persisted, versioned, reviewed, and handed to downstream engineering agents as a formal artifact package.
 - **Pluggable Visual Design Providers:** Visual design generation is implemented through a provider-agnostic design capability, not by hard-coding model vendors or design applications such as Figma. A Figma integration, if introduced later, is a distinct Nexus-owned provider implementation rather than the default architecture.
 - **File-Based Standards Layer for Org/Project Conventions:** Organization- and project-specific conventions (approved libraries, coding style, documentation format, UI/UX libraries, backend architecture, code review format) are captured as git-versioned `instructions.md` + domain-scoped `skills/*.md` files, resolved org → project and injected directly into agent prompts — not retrieved via RAG. Sage's RAG index is reserved for large, unstructured, or fast-changing knowledge (the codebase, Confluence, Jira) that can't be hand-curated into a file. See §9.1.
+- **Agent Capability Tiers, Not a Uniform Capability Set:** Agents only get the capability surface their job actually requires — pure reasoning (PO), reasoning plus read-only grounding via RAG (Architecture, Review, Documentation), or reasoning plus isolated write/execute access (the Developer Agent). An agent that only ever judges or advises never receives worktree or command-execution rights. See §8.
 - **CLI-First with API Boundary:** V1 delivers a local CLI interfacing directly with the platform engine via a local JSON-RPC / REST contract over IPC/HTTP, guaranteeing full GUI compatibility without refactoring core orchestration logic.
 
 ---
@@ -155,7 +156,8 @@ flowchart TD
 | **Design Capability Adapter**        | Pluggable Visual Design Execution | Implements the `DesignCapability` abstraction (`capabilities/design.py`) plus its default/mock provider for the UX Agent, using the same seam-only pattern as `ReasoningCapability`. Real vendor/design-tool providers (including any future Figma provider) are separate implementations behind this seam, built and owned by whoever supplies that integration (e.g. **Nexus** for `integrations/design_provider.py`) — this row is the abstraction itself, not any specific provider. | Design request payloads, provider policy, artifact fidelity needs | Structured design artifacts, artifact metadata, provider response envelopes | Capability Router, provider SDKs | **Craft** |
 | **Knowledge Engine**                 | Context Assembly             | Performs hybrid RAG search across codebase, Jira, and Confluence to inject precise context into agent prompts.                                                                                                                | Query strings, semantic context scope              | Context bundles, metadata-attributed code snippets | Vector DB, embedding models  | **Sage**                   |
 | **Standards Resolver**               | Org/Project Convention Injection | Resolves and merges `instructions.md` + domain-scoped `skills/*.md` across platform → org → project scope; selects the agent-relevant subset and injects it into prompt assembly.                                          | Org config path, project `.ai-sdlc/standards/`, agent_id | Merged instruction context bundle             | Filesystem, Agent Factory    | **Craft**                  |
-| **Developer Runtime**                | Code Generation & Execution  | Interfaces with repo files, executes local builds/tests via CLI, interacts with GitHub Copilot CLI, and manages Git branches.                                                                                                 | Code modification specs, test commands             | Patch files, execution outputs, PR URLs            | Git CLI, subshell execution  | **Forge**                  |
+| **Developer Runtime**                | Code Generation & Execution  | Owns the Developer Agent end-to-end: assembles the approved spec (requirements + architecture + approved UX package) plus applicable Standards Context into a task, hands it to `CodingCapability`, then takes the resulting change through build/test self-checks, branch push, and PR creation — all inside an isolated working tree, never the initiator's live checkout. See §4 "Developer Agent Contract". | Approved spec package, target repository pointer, Standards Context bundle | Isolated branch + commit(s), self-check results, an opened GitHub PR (only after human approval — see §6 handoff) | `CodingCapability`, Git/GitHub tooling | **Forge**                  |
+| **Coding Capability Adapter**        | Pluggable Code-Generation Execution | Implements the `CodingCapability` abstraction (`capabilities/coding.py`) plus its default/mock provider for the Developer Agent, using the same seam-only pattern as `ReasoningCapability`/`DesignCapability`. Real providers — V1's agentic coding-tool SDK harness, and any later provider (e.g. a cloud-hosted coding-agent product with its own remote-trigger-and-poll integration shape) — are separate implementations behind this seam. This row is the abstraction itself, not any specific provider; provider choice is a per-workspace setting captured at `ai-sdlc init` (see §12). | Task/context payload, target working-tree path, allowed-tool/command policy | Structured change summary, self-check results, provider response envelope | Capability Router, provider SDKs | **Forge** |
 | **Agent Factory**                    | Specialist Instantiation     | Provides structural base classes and builders to generate specialist SDLC agents (PO, UX, Arch, Sec, Test).                                                                                                                   | Agent config, prompt templates, tools              | Executable specialist agent instances              | Capability Engine, Nexus     | **Craft**                  |
 | **Client UI / CLI**                  | Human Interaction Layer      | Renders workflow status, formats artifact diffs, prompts for clarification, and captures milestone approvals via Public API endpoints.                                                                                        | User terminal input, Orchestrator IPC events       | User approval signals, text prompts                | `rich`, `typer`, Async IPC   | **Pixel**                  |
 | **Evaluation Engine**                | Quality Gate & Testing       | Assesses agent execution quality, contract compliance, structural outputs, and platform regression suites.                                                                                                                    | Agent invocation logs, output JSONs                | Quality scores, contract pass/fail flags           | `pytest`, evaluation schemas | **Sentinel**               |
@@ -279,6 +281,86 @@ The shipped Craft UX agent implementation already exposes a tested, working outp
 ```
 
 The additive fields are optional. Existing consumers that ignore them continue to work because the original shipped schema remains valid. If a future implementation requires a breaking change to the shipped contract, it must be treated as a migration event and explicitly documented.
+
+### Developer Agent Contract (Forge)
+
+#### Scope
+
+The Developer Agent's job is exactly one thing: **turn an already-approved spec into a real, isolated, self-checked code change in the target codebase, ready for a human to review.** Everything upstream of "the spec is approved" and everything downstream of "a human reviews the result" belongs to something else already built or already scoped:
+
+- It does not produce the requirements, architecture, or design — PO/Architecture/UX (existing Craft agents) already did, and the Developer Agent only ever receives their approved output (see "UX → Developer Agent Handoff Contract" in §6, which this section extends).
+- It does not establish which repository it's working against — the target repository path is already captured once, at `ai-sdlc init` (§12), the same way it is for every other agent.
+- It does not build a new approval mechanism — it reuses the Orchestrator's existing `WAITING_FOR_APPROVAL` / `submit_approval` gate verbatim, the same one UX artifacts already use (§6, "UX Revision & Feedback Loop"). Nothing it produces takes effect on the initiator's real working directory until that gate is cleared.
+- It does perform a first pass of self-checking — running the codebase's own existing build/test commands as part of its own loop, to catch obvious breakage before presenting anything. It does not do independent quality assurance: authoring new tests, judging coverage, or deeper review is the (not yet built) Testing/Review Agents' job, running as a later stage.
+
+#### Execution Model
+
+The Developer Agent does not implement its own code-generation or code-execution engine. It calls `CodingCapability` (§8), which delegates to a pluggable provider — an existing agentic coding tool, harnessed programmatically rather than rebuilt. V1's provider drives that tool in a fully unattended permission mode (no per-edit prompts), scoped to:
+
+1. **An isolated working tree** — a disposable Git worktree/branch created off the target repository, never the initiator's live checkout. All file edits and command execution happen only here.
+2. **An explicit tool/command allow-list** — mirroring §10's existing sandboxing requirement (`git`, `mvn`, `gradle`, `npm`, `pytest`, ...); anything outside the allow-list is denied outright, not prompted.
+
+Once the provider finishes (or exhausts its retry/step budget), the Developer Agent runs the target codebase's own build/test commands as a self-check, then packages the diff as a pending artifact and requests approval through the existing mechanism — it does not push a branch or open a PR until that approval is granted. On approval, it pushes the isolated branch and opens the PR (the platform's stated end product, per §1) — this is a real PR a human merges through normal GitHub review, never a silent local merge. On rejection, the same revision-loop pattern UX already uses applies: the feedback is threaded back in as an additional input, and the Developer Agent produces a new attempt.
+
+Provider choice (which agentic coding tool backs `CodingCapability` for a given workspace) is a setting captured once at `ai-sdlc init`, not re-asked per workflow — see §12's `--coding-provider` option and §20's resolved Copilot-integration question.
+
+#### Input Contract (`DeveloperAgentInput`)
+
+```json
+{
+  "workflow_id": "wf_123456789",
+  "initiator": "harshit.bhatt@org.com",
+  "requirements": {
+    "feature_title": "Redis Cache Integration for Order Service",
+    "functional_requirements": ["..."],
+    "non_functional_requirements": ["..."],
+    "acceptance_criteria": ["..."]
+  },
+  "architecture_context": {
+    "tech_stack": ["Java", "Spring Boot", "Gradle"],
+    "components_affected": ["OrderService", "OrderCacheConfig"]
+  },
+  "ux_artifact_package": {
+    "ux_specification": { "...": "as defined in §6's UX → Developer Agent Handoff Contract" },
+    "approved_artifacts": ["..."],
+    "design_package_status": "APPROVED"
+  },
+  "target_repository": {
+    "workspace_path": "/abs/path/to/order-service",
+    "base_branch": "main"
+  },
+  "standards_context": {
+    "instructions": "...merged org → project instructions.md content...",
+    "skills": ["backend-architecture.md"]
+  },
+  "coding_provider": "configured at ai-sdlc init, not chosen per-call"
+}
+```
+
+`ux_artifact_package` is omitted (not empty) for workflows where UX design was not required for the given change; `requirements`/`architecture_context` are always present, threaded forward the same way Architecture/UX already receive PO's output today.
+
+#### Output Contract (`DeveloperAgentOutput`)
+
+```json
+{
+  "success": true,
+  "status_code": "NEEDS_APPROVAL",
+  "data": {
+    "branch_name": "forge/redis-cache-integration-wf123456789",
+    "files_changed": ["src/main/java/.../OrderCacheConfig.java", "src/main/java/.../OrderService.java"],
+    "self_check": {
+      "build_passed": true,
+      "tests_passed": true,
+      "commands_run": ["./gradlew build", "./gradlew test"]
+    },
+    "pull_request": null
+  },
+  "clarification_message": null,
+  "error_message": null
+}
+```
+
+`pull_request` is populated (`{"url": "...", "number": 42}`) only after the pending change is approved and the Developer Agent has actually pushed the branch and opened it — never before, matching the "does not push/open until approved" rule above.
 
 ### Agent Contract Example (PO Agent)
 
@@ -699,6 +781,10 @@ UX Artifact Package (constructed by Core from ux.json, passed to the Developer A
 
 If `design_package_status` is not `APPROVED`, Core does not construct or hand off a package — the Developer Agent stage cannot begin. This mirrors the existing rule that the Orchestrator only advances past a `WAITING_FOR_APPROVAL` stage once a decision is recorded, not before.
 
+This UX package is combined with `requirements`/`architecture` — already threaded forward automatically via `wf.inputs`, the same mechanism that already gives the Architecture and UX Agents each other's prior output — plus the applicable Standards Context bundle (§9.1), into the full `DeveloperAgentInput` described in §4's "Developer Agent Contract". Not every workflow requires a UX design; when it doesn't, `ux_artifact_package` is simply absent from that input rather than blocking the Developer Agent stage.
+
+The Developer Agent's *own* output goes through the identical approval gate a second time, for a different artifact: not a design, but the actual code change itself (a branch + diff, self-checked against the codebase's own build/tests). See §4's "Execution Model" for why nothing is pushed or opened as a PR until that second approval clears.
+
 ### Primary Schemas
 
 #### 1. `workflow.json` Schema
@@ -893,18 +979,20 @@ If `design_package_status` is not `APPROVED`, Core does not construct or hand of
 │    MCP Servers (External)    │   Native Adapters (Local)    │
 │  - GitHub MCP                │   - Subshell Command Exec    │
 │  - Jira MCP                  │   - Local AST/File Reader    │
-│  - Confluence MCP            │   - Copilot CLI Process Exec │
+│  - Confluence MCP            │                               │
 └──────────────────────────────┴──────────────────────────────┘
 
 ```
 
+The Developer Agent's own coding-provider execution (§4, §8) is deliberately **not** routed through the Nexus Tool Router above — it's Forge's own `CodingCapability` seam, invoked directly, since it's a single self-contained harness call (task in, isolated-branch result out) rather than a discrete external tool call needing MCP's standardization. Nexus's GitHub MCP remains the path for GitHub operations *other than* the Developer Agent's own branch/commit/push/PR flow — e.g. issue sync, PR comments, or a future cloud-hosted `CodingCapability` provider whose integration shape is a remote trigger-and-poll rather than a local harness call.
+
 ### Tool Categories
 
-1. **GitHub Adapter:** Uses GitHub MCP for remote PR generation, branch locking, and issue sync. Uses native Git CLI locally for rapid branch creation, commits, and diff calculation.
+1. **GitHub Adapter:** Uses GitHub MCP for issue sync and PR comments, and as the integration point for any future remote-triggered `CodingCapability` provider. The Developer Agent's own branch creation, commits, push, and PR creation for its primary (V1) coding-provider flow happen inside its own isolated working tree via that provider's own tool use (see §4, §8) — not through this adapter.
 2. **Jira Adapter:** MCP-backed tool providing issue creation, status transition (`In Progress`, `Under Review`), and comment updates.
 3. **Confluence Adapter:** MCP-backed tool for auto-generating architecture decision records (ADRs) and feature design pages.
 4. **Design Provider Adapter:** A provider-agnostic Nexus integration that can call multimodal LLMs, image-generation services, or future design-tool APIs to generate or refine UX design artifacts. It is implemented behind `DesignCapability` and never exposes vendor-specific APIs directly to the UX Agent.
-5. **Filesystem & Terminal Engine:** Native Python OS module with tight sandboxing (`chroot` lock to workspace root) ensuring agents cannot modify files outside target repo boundaries.
+5. **Filesystem & Terminal Engine:** Native Python OS module with tight sandboxing (`chroot` lock to workspace root) ensuring agents cannot modify files outside target repo boundaries. For the Developer Agent specifically, this containment is narrower still: its coding provider is scoped to a disposable Git worktree *inside* that root, never the initiator's live checkout, so a mistake can't touch uncommitted work sitting in the same repo (§4).
 
 For V1, visual design generation means a provider-backed AI capability that produces design assets and metadata. A direct Figma file integration is deliberately not the default architecture; if introduced later, it should be modeled as a separate provider implementation of `DesignCapability` owned by Nexus.
 
@@ -932,11 +1020,27 @@ Model Layer     Anthropic             OpenAI               Local / Ollama
 
 `DesignCapability` is a new capability abstraction used by the UX Agent when it needs to generate or refine visual design artifacts. It is intentionally provider-agnostic and may be implemented by a multimodal LLM, an image-generation provider, or a design-service adapter. The Capability Router resolves the request to the best available provider, applies policy guards, and may fall back to a secondary provider if the preferred provider is unavailable or rate-limited. The UX Agent contract remains stable because the capability interface exposes a normalized request/response envelope rather than vendor-specific APIs.
 
+`CodingCapability` is the Developer Agent's equivalent seam, and it is deliberately shaped differently from `ReasoningCapability`/`DesignCapability`: those are single request/response calls (prompt or design brief in, one validated result out), but writing code into an existing repository is inherently iterative — the provider needs to read files, decide what to change, edit, run commands, and react to the results before it's actually done. `CodingCapability` therefore wraps a provider's own bounded agentic loop (read/edit/run-command, repeated until done or a step limit is hit) rather than a single completion. Nova does not implement this loop itself: V1's provider harnesses an existing agentic coding tool programmatically (invoked unattended, scoped to an isolated working tree and an explicit allowed-tool/command list — see §4, §10), the same way `DesignCapability`'s provider calls out to an existing image/design vendor rather than Nova generating pixels itself. The Developer Agent's contract stays stable regardless of which coding tool backs the configured provider, for the same reason the UX Agent's contract stays stable across design providers: the capability interface returns a normalized envelope (§4's `DeveloperAgentOutput`), never a provider-specific result shape.
+
+### Agent Capability Tiers
+
+Not every agent needs the same capability surface, and handing an agent more than its job requires is unnecessary blast radius — a Review Agent that can execute shell commands defeats the point of having a review gate. Agents fall into three tiers by what they're permitted to read and, separately, permitted to write or execute:
+
+| Tier | Capabilities | Agents | Read/Grounding | Write/Execute |
+| --- | --- | --- | --- | --- |
+| **Tier 1 — Reasoning only** | `ReasoningCapability` | PO | Only what's already in `inputs` (raw requirement, prior clarifications) | None |
+| **Tier 2 — Reasoning + read-only grounding** | `ReasoningCapability` + `RetrievalCapability` | Architecture, Review, Documentation | §9's Knowledge Engine — codebase (Tree-Sitter/AST), Jira, Confluence — via one hybrid RAG query, same seam regardless of which source the answer lives in | None. No working tree, no sandbox, no tool/command allow-list — these agents only ever return a structured judgment or artifact, never a file edit. |
+| **Tier 3 — Reasoning + write + execute** | `ReasoningCapability` + `CodingCapability` | Developer Agent (Forge); Testing, once built | Everything Tier 2 has, plus the target repository itself via the isolated working tree | Isolated Git worktree, allow-listed tool/command execution (§10) — never the initiator's live checkout, never surfaced outside the existing approval gate (§6) |
+
+The dividing line isn't "does this agent need context" — every agent past Tier 1 does — it's "does this agent need to *act* on the target repository." UX sits alongside Tier 2's no-target-repo-write boundary: it layers `DesignCapability` (§18 Decision 3) on top of `ReasoningCapability` to generate visual artifacts, but those artifacts persist into platform state (`.ai-sdlc/`) via the State & Schema Engine, never into the target codebase, so it doesn't need Tier 3's worktree/execute model either.
+
+Tier 2's `RetrievalCapability` is the same seam already specified in §9 — naming it here doesn't add new sources. "Documentation" in Tier 2's grounding means whatever Sage's Enterprise Connectors already sync (Confluence today, §9); it is distinct from §9.1's Standards Context Layer, which is curated, human-authored convention injected directly (not retrieved) into every tier's prompt uniformly, independent of which tier the receiving agent is in.
+
 ---
 
 ## 9. Knowledge Architecture (RAG)
 
-**Sage** provides unified organizational knowledge retrieval through a dual-index architecture:
+Consumed by Tier 2 and Tier 3 agents (§8) via `RetrievalCapability`, distinct from §9.1's directly-injected Standards Layer. **Sage** provides unified organizational knowledge retrieval through a dual-index architecture:
 
 1. **Static AST & Repository Indexing:** Tree-Sitter processes target application codebases, producing semantic chunks linked to exact file/class paths.
 2. **Enterprise Connectors:** Synchronizes documentation from Jira/Confluence.
@@ -993,7 +1097,7 @@ At agent-instantiation time, the **Standards Resolver** merges these layers and 
 - All input from target application repositories (e.g., `README.md`, source code comments) is sanitized by Aegis before injection into LLM context windows.
 - System prompts are strictly separated from user data frames inside JSON structures.
 
-- **Tool Sandboxing:** Terminal command execution by **Forge** is strictly limited to an explicitly allowed command list (`git`, `mvn`, `gradle`, `npm`, `pytest`). Destructive commands (`rm -rf /`, raw network sockets, elevation commands like `sudo`) are explicitly blocked.
+- **Tool Sandboxing:** Terminal command execution by **Forge** is strictly limited to an explicitly allowed command list (`git`, `mvn`, `gradle`, `npm`, `pytest`). Destructive commands (`rm -rf /`, raw network sockets, elevation commands like `sudo`) are explicitly blocked. This is enforced two ways, not one from-scratch sandbox: (1) the `CodingCapability` provider is invoked in an unattended permission mode that denies, rather than prompts for, any tool/command outside the allow-list — configuration of an existing harness, not new sandbox infrastructure Nova builds; (2) it is additionally confined to the disposable Git worktree described in §4/§7, so even an allowed command (e.g. `git`) can only ever affect that isolated checkout, never the initiator's real working directory, until a human approves the result.
 - **Design Artifact Validation:** Generated visual artifacts are validated before persistence to confirm they are of the expected type, size, hashable payload, and free of embedded secrets or malicious payloads. Invalid artifacts are rejected and not inserted into the approved artifact set.
 - **Provider Credential Handling:** Design providers are accessed through Nexus-owned adapters that read credentials from the secure secret vault; the UX Agent never receives raw credentials or provider-specific connection details.
 - **Prompt & Input Sanitization:** Prompt payloads sent to the design provider are sanitized to remove secrets, prompt-injection payloads, and repository content that should not leave the workspace without approval.
@@ -1069,7 +1173,7 @@ The V1 user experience is powered by a CLI built on `typer` and `rich`, invoking
 
 ### Commands
 
-- `ai-sdlc init`: Initializes `.ai-sdlc/` state folder, agent registry metadata, and local CLI config in the target application repository; optionally starts the Core Platform API server as a background process (`--start-server`). Deliberately kept **separate** from `start` — set up once, start as many workflows afterward as needed.
+- `ai-sdlc init`: Initializes `.ai-sdlc/` state folder, agent registry metadata, and local CLI config in the target application repository; optionally starts the Core Platform API server as a background process (`--start-server`). Also captures which `CodingCapability` provider the Developer Agent should use for this workspace (`--coding-provider`, e.g. an agentic-coding-tool harness for V1), a once-per-workspace setting rather than something re-asked per workflow (§4, §8). Deliberately kept **separate** from `start` — set up once, start as many workflows afterward as needed.
 - `ai-sdlc start --prompt "<requirement>"`: The primary human-facing entry point. Calls `start_workflow()`, then **drives the workflow interactively to completion in one continuous session** rather than returning after a single stage (see §12.1 for the loop).
 - `ai-sdlc status`, `answer`, `approve`, `reject`, `cancel`: Discrete, scriptable commands mirroring `get_workflow_status()` / `submit_clarification()` / `submit_approval()` / `cancel_workflow()` 1:1. These remain available as manual escape hatches — resuming a session interrupted mid-loop (e.g. Ctrl-C), CI/non-interactive use, or driving a workflow from outside the interactive session — but a human is no longer expected to reach for them as the primary way to drive a workflow.
 
@@ -1085,7 +1189,7 @@ Unlike a single request/response call, `start` keeps running in the foreground a
 
 This changes the CLI's default UX, not the public API contract: every step in the loop is still just `start`/`status`/`answer`/`approve` calls against the unchanged `v1` API — `start` is simply the first client to chain them together automatically on the user's behalf instead of requiring separate manual invocations per stage.
 
-**Open question (see §20):** exact behavior on interrupt (e.g. Ctrl-C) mid-loop, and whether a non-interactive/CI mode (`--no-wait`, exiting at the first interrupt like the original one-shot behavior) is needed alongside the interactive default, are not yet decided.
+**Resolved** (see §20 Q6): non-interactive sessions (no TTY) never block on input — `start` stops at the first pending action and prints the escape-hatch commands instead of prompting, rather than needing a separate `--no-wait` flag. Ctrl-C/EOF mid-loop leaves the workflow exactly where the server already had it paused and exits cleanly, rather than attempting a cancel.
 
 ---
 
@@ -1133,12 +1237,21 @@ Phase 2: Specialist Agents & Capabilities (Craft / Sage / Forge)
    ├── Introduce `DesignCapability` and a first provider adapter (multimodal or image-provider based)
    ├── Implement Standards Resolver (org/project instructions.md + skills/*.md)
    ├── Implement the UX review/revision loop and approval semantics
-   └── Implement Developer Agent handoff to the approved UX artifact package
+   ├── Implement Developer Agent handoff to the approved UX artifact package (§6)
+   ├── Introduce `CodingCapability` (§8) and its V1 provider: an existing agentic coding
+   │      tool, harnessed programmatically (unattended, isolated working tree, allow-listed
+   │      tools/commands) rather than a custom-built code-execution engine
+   ├── Wire the Developer Agent as a fourth graph node (Orion), reachable only once
+   │      `design_package_status == APPROVED` (§6)
+   └── Add `--coding-provider` selection to `ai-sdlc init` (Pixel, §12)
 
 Phase 3: Security, QA & Integration (Aegis / Sentinel / Nexus)
    ├── Integrate design-provider credentials via Nexus adapters
    ├── Enforce artifact validation, prompt sanitization, and observability
-   └── Integrate GitHub PR API Adapter & Aegis Sanitizer
+   ├── Enforce the Developer Agent's tool/command allow-list and working-tree isolation (§10)
+   └── Integrate GitHub PR API Adapter (issue sync / PR comments / a future remote-triggered
+          `CodingCapability` provider — not the Developer Agent's own primary branch/PR
+          flow, which it drives itself; see §7) & Aegis Sanitizer
 
 ```
 
@@ -1160,6 +1273,16 @@ Phase 3: Security, QA & Integration (Aegis / Sentinel / Nexus)
 - **Reason:** Visual design generation is treated as a capability, not a direct dependency of the UX Agent on a model vendor or design platform. This keeps the agent contract stable while allowing multimodal models, image-generation services, or future design-tool adapters to supply lo-fi/mid-fi/hi-fi artifacts.
 - **Alternatives Rejected:** Hard-coding one specific image model directly inside `ux_agent.py` (rejected because it would break vendor independence and make provider swaps difficult), and treating Figma as the only source of truth for UX artifacts (rejected for V1 because it conflates AI generation with native design-tool editing and would add an unnecessary integration dependency).
 
+### Decision 4: `CodingCapability` Harnesses an Existing Agentic Coding Tool, Rather Than Nova Building Its Own Code-Execution Engine
+
+- **Reason:** Every production coding agent surveyed (GitHub Copilot's coding agent, OpenAI Codex Cloud, Google Jules, Cursor's background agents) converges on the same shape: an isolated, disposable environment; the repo cloned/checked out into it; a bounded read-edit-run-command loop; and the agent itself owning its branch/commit/PR flow end-to-end rather than splitting code-writing and PR-creation across two different services. Building a comparable engine from scratch is a multi-year bet these companies made because *being* a coding agent is their whole product; for Nova, whose job is orchestrating the broader SDLC workflow around one, harnessing an existing tool programmatically (unattended permission mode, scoped working directory, allow-listed tools/commands) reaches the same architecture at a fraction of the cost, and is consistent with how `DesignCapability` already treats image/design generation as something Nova calls, not something Nova implements.
+- **Alternatives Rejected:** Building a custom sandboxed execution engine and code-generation loop in-house (rejected: substantial, high-risk scope duplicating what mature external tools already solve, for a capability that isn't Nova's core differentiator). Giving the Developer Agent only a single request/response `complete()`-style call, matching `ReasoningCapability`'s shape exactly (rejected: writing code into an existing repository is inherently iterative — deciding what to change requires reading the codebase first — so a one-shot call can't express the actual work being done). Splitting code-writing (Forge) and PR-opening (Nexus) across two different owners, as originally implied by §3's component table (rejected after the same survey above: no real product divides these two responsibilities, and doing so would leave Forge unable to complete a task without a second agent's involvement for every single change).
+
+### Decision 5: Three-Tier Agent Capability Model, Not a Uniform Capability Set Across Agents
+
+- **Reason:** §8's capability layer (`ReasoningCapability`/`RetrievalCapability`/`CodingCapability`/`DesignCapability`) already lets any agent be wired to any capability, which begs the question of which agents actually should be. Applying the principle of least privilege already used for Forge's tool/command allow-list (§10) at the agent level too — not just inside Forge's own sandbox — means an agent whose job is to judge or advise (Review, Documentation, Architecture) is structurally incapable of writing to the target repository, rather than merely trusted not to. This makes the review/documentation gates meaningful: nothing about how they're wired could ever bypass the approval gate the way a write-capable agent could.
+- **Alternatives Rejected:** Giving every specialist agent the same full capability set (`ReasoningCapability` + `RetrievalCapability` + `CodingCapability`) for interface uniformity (rejected: unnecessary blast radius — a bug or prompt-injection payload reaching the Review Agent should not be able to execute a shell command, and "we don't call that capability today" is a weaker guarantee than "that agent was never given it"). Scoping capability access per-call instead of per-agent-type (rejected: adds a runtime policy-check layer for a distinction that's static and known at agent-registration time — which agents are Tier 3 doesn't change between invocations).
+
 ---
 
 ## 19. Risks and Mitigation Strategies
@@ -1176,10 +1299,13 @@ Phase 3: Security, QA & Integration (Aegis / Sentinel / Nexus)
 ## 20. Open Questions
 
 1. **Jira Lifecycle Policy:** Should the platform automatically transition existing Jira tickets during workflow progress, or only create/comment on tickets upon explicit human approval?
-2. **Copilot CLI Integration Scope:** Should **Forge** interact with GitHub Copilot strictly via Copilot CLI subprocess calls, or fall back to direct LLM provider API invocations when Copilot CLI is unavailable locally?
+2. ~~**Copilot CLI Integration Scope**~~ **Resolved:** the premise conflated two different things — a local "Copilot CLI" for command suggestions, and GitHub's actual autonomous coding agent, which is a separate cloud-hosted product triggered by assigning it a GitHub issue, not a local subprocess. Neither is V1's provider. `CodingCapability`'s V1 provider harnesses an existing agentic coding tool programmatically (unattended, isolated working tree, allow-listed tools — §4, §8, §10), invoked directly by Forge rather than wrapped as a subprocess of a separate CLI product. Provider choice is a per-workspace `ai-sdlc init` setting (§12), not a runtime fallback decision. **Still open:** if/when a second, remote-triggered provider (e.g. a cloud-hosted coding-agent product) is added, its integration shape is a trigger-and-poll against an external API, not a local harness call — worth its own design pass when actually built, not before.
 3. **Default Design Provider:** Which provider category should be the default first implementation for `DesignCapability` in V1: a multimodal LLM, an image-generation service, or a future design-service adapter?
 4. **Approval Granularity:** Should the human approval gate apply to each fidelity level (`LO_FI`, `MID_FI`, `HI_FI`) independently, or should the workflow require only a single final approval before downstream handoff?
 5. **Figma Integration Timing:** Should Nexus add a Figma-native write path as a second provider implementation later, or should the initial UX artifact pipeline remain entirely file-based and provider-agnostic?
-6. **Interactive CLI Interrupt Handling:** What should `ai-sdlc start`'s interactive loop (§12.1) do on Ctrl-C mid-session — leave the workflow paused at its current stage for a later `status`/`answer` to resume, or attempt a clean cancel? Is a non-interactive/CI mode (exiting at the first interrupt instead of prompting) needed alongside the interactive default, and if so what triggers it (a flag, or absence of a TTY)?
+6. ~~**Interactive CLI Interrupt Handling**~~ **Resolved** (`agents/pixel-cli-interactive-loop`, merged): non-interactive sessions (no TTY) never block on input — `start` stops at the first pending action and prints the scriptable-escape-hatch commands instead of prompting. Ctrl-C/EOF mid-prompt leaves the workflow exactly where the server already has it (paused on its pending clarification/approval) and exits cleanly with a "resume with `answer`/`approve`/`reject`" hint, rather than attempting a cancel.
+7. **Developer Agent Self-Check Scope:** §4's self-check step runs the target codebase's *existing* build/test commands. If a codebase has none configured (or the Standards Context doesn't specify how to run them), does the Developer Agent skip self-checking entirely, block and request clarification, or fall back to a Standards-Layer-declared default per tech stack?
+8. **Coding-Provider Retry/Step Budget:** §8's agentic loop needs a bounded step/attempt limit (mirroring `Orchestrator`'s existing `max_attempts` retry ceiling for specialist agents) so a provider that can't converge fails cleanly instead of running indefinitely — what should that limit be, and is it configurable per workspace or fixed platform-wide?
+9. **Testing Agent's Exact Tier Placement:** §8 provisionally places the (not yet built) Testing Agent in Tier 3 alongside Forge, assuming it authors test code directly via the same write+execute worktree model. An alternative is a narrower Tier 2.5: read-only grounding plus *execute-only* rights (run the existing test suite, no source edits) — closer to a CI runner than a coding agent. Which shape is correct depends on whether "Testing" means "writes new tests" or "runs and reports on existing ones," which hasn't been scoped yet.
 
 ---
