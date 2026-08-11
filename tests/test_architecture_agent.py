@@ -14,6 +14,7 @@ from ai_sdlc.agents.architecture.schemas import ArchitectureOutputData
 from ai_sdlc.agents.base import AgentRequest, AgentStatus
 from ai_sdlc.agents.po.po_agent import POAgent
 from ai_sdlc.capabilities.providers.mock import MockReasoningProvider
+from ai_sdlc.capabilities.providers.retrieval_mock import MockRetrievalProvider
 from ai_sdlc.orchestration.orchestrator import AgentExecutionError
 
 
@@ -119,6 +120,54 @@ def test_architecture_output_data_rejects_empty_required_list():
     }
     with pytest.raises(ValidationError):
         ArchitectureOutputData(**payload)
+
+
+def test_no_workspace_path_means_no_retrieval_call_and_unchanged_prompt():
+    """Backward compatibility: every caller/test that predates
+    RetrievalCapability wiring never sets `target_repository`, so this
+    must produce the exact same behavior as before -- no retrieval call
+    at all, not even a failing one."""
+    agent = ArchitectureAgent(
+        retrieval=MockRetrievalProvider(force_error="provider_failure")
+    )
+    request = _make_request({"requirements": _SAMPLE_REQUIREMENTS})
+
+    # If retrieval were called, force_error="provider_failure" would raise
+    # ProviderError -> AgentExecutionError. Success here proves it wasn't.
+    result = agent.execute(request)
+
+    assert result.status == AgentStatus.COMPLETED
+
+
+def test_workspace_path_present_triggers_retrieval_and_grounds_prompt():
+    agent = ArchitectureAgent(retrieval=MockRetrievalProvider())
+    request = _make_request(
+        {
+            "requirements": _SAMPLE_REQUIREMENTS,
+            "target_repository": {"workspace_path": "/abs/path/to/order-service"},
+        }
+    )
+
+    prompt = agent.build_prompt(request)
+
+    assert "/abs/path/to/order-service" in prompt
+    assert "Relevant existing codebase context" in prompt
+    assert _SAMPLE_REQUIREMENTS["feature_title"] in prompt
+
+
+def test_retrieval_failure_with_workspace_path_raises_agent_execution_error():
+    agent = ArchitectureAgent(
+        retrieval=MockRetrievalProvider(force_error="provider_failure")
+    )
+    request = _make_request(
+        {
+            "requirements": _SAMPLE_REQUIREMENTS,
+            "target_repository": {"workspace_path": "/abs/path/to/order-service"},
+        }
+    )
+
+    with pytest.raises(AgentExecutionError):
+        agent.execute(request)
 
 
 def test_requirements_to_architecture_flow_is_coherent():

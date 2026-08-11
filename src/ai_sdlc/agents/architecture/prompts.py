@@ -4,7 +4,7 @@ Plain text only -- no provider-specific message roles/formatting.
 """
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 ROLE_AND_RESPONSIBILITY = """\
 You are the Architecture Agent for an AI-assisted SDLC platform.
@@ -27,6 +27,10 @@ Constraints:
 - If the requirements provided are missing or empty, do not guess -- a
   clarification question should be raised instead (this decision is made
   before this prompt is ever sent).
+- When real codebase context is provided below, ground component_changes
+  and decisions in what actually exists in the repository rather than
+  assuming a greenfield implementation; when no codebase context is
+  provided, reason from the requirements alone as before.
 """
 
 OUTPUT_STRUCTURE = """\
@@ -39,9 +43,18 @@ Produce a structured architecture with exactly these fields:
 """
 
 
-def build_architecture_prompt(requirements: Dict[str, Any]) -> str:
+def build_architecture_prompt(
+    requirements: Dict[str, Any], codebase_context: Optional[str] = None
+) -> str:
     """Build the plain-text prompt for a single Architecture Agent
     invocation from a requirements dict (e.g. `POAgentOutputData.model_dump()`).
+
+    `codebase_context` is the optional `RetrievalCapability` context
+    summary gathered by `ArchitectureAgent._gather_codebase_context()`
+    (Tier 2 grounding, `docs/architecture/v1_architecture.md` section 8) --
+    `None` when no real repository path was supplied for this invocation,
+    which is true for every caller/test that predates this parameter, so
+    omitting it produces the exact same prompt as before this existed.
     """
     lines = []
     for key, value in requirements.items():
@@ -52,10 +65,18 @@ def build_architecture_prompt(requirements: Dict[str, Any]) -> str:
         lines.append(f"- {key}: {rendered}")
     requirements_block = "\n".join(lines) or "(no requirements provided)"
 
+    codebase_section = ""
+    if codebase_context:
+        codebase_section = (
+            "Relevant existing codebase context:\n"
+            f'"""\n{codebase_context}\n"""\n'
+        )
+
     return (
         f"{ROLE_AND_RESPONSIBILITY}\n"
         f"{CONSTRAINTS}\n"
         f"{OUTPUT_STRUCTURE}\n"
         "Structured requirements:\n"
         f'"""\n{requirements_block}\n"""\n'
+        f"{codebase_section}"
     )
