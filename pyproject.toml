@@ -13,6 +13,17 @@ dependencies = [
     "rich>=13.0",
 ]
 
+[project.optional-dependencies]
+# The real GitHub Copilot CodingCapability provider
+# (capabilities/providers/coding_copilot.py). Optional because
+# `github-copilot-sdk` requires Python 3.11+ -- stricter than this
+# project's own `requires-python = ">=3.10"` -- so environments on 3.10
+# can still install/run ai-sdlc (with the mock coding provider, or a
+# non-Copilot provider) without this extra. Flagged for the project as a
+# whole to resolve: either bump `requires-python` to >=3.11, or accept
+# that the Copilot provider is unavailable on 3.10.
+copilot = ["github-copilot-sdk>=1.0.9"]
+
 [project.scripts]
 ai-sdlc = "ai_sdlc.cli.main:app"
 
