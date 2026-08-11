@@ -62,9 +62,18 @@ def init(
         "--start-server/--no-start-server",
         help="Start the Core Platform API as a background process if one isn't already reachable.",
     ),
+    agent_framework: Optional[str] = typer.Option(
+        None,
+        "--agent-framework",
+        help=(
+            "AI agent framework to use for the Coding/Retrieval capabilities (claude or copilot). "
+            "A one-time choice: once stored, later `init` runs reuse it unless this flag overrides it. "
+            "Prompted for interactively if omitted and nothing is stored yet."
+        ),
+    ),
 ) -> None:
     """Write local CLI config and scaffold agent registry metadata for WORKSPACE."""
-    handlers.run_init(console, workspace, host, port, initiator_id, start_server)
+    handlers.run_init(console, workspace, host, port, initiator_id, start_server, agent_framework)
 
 
 @app.command()

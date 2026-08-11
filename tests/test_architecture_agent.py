@@ -14,6 +14,7 @@ from ai_sdlc.agents.architecture.schemas import ArchitectureOutputData
 from ai_sdlc.agents.base import AgentRequest, AgentStatus
 from ai_sdlc.agents.po.po_agent import POAgent
 from ai_sdlc.capabilities.providers.mock import MockReasoningProvider
+from ai_sdlc.capabilities.providers.retrieval_factory import PROVIDER_ENV_VAR
 from ai_sdlc.capabilities.providers.retrieval_mock import MockRetrievalProvider
 from ai_sdlc.orchestration.orchestrator import AgentExecutionError
 
@@ -41,6 +42,23 @@ _SAMPLE_REQUIREMENTS = {
     "out_of_scope": ["Distributed session management."],
     "acceptance_criteria": ["Verify that: cache hit ratio is measurable via metrics endpoint."],
 }
+
+
+def test_retrieval_defaults_to_mock_when_agent_framework_unconfigured(monkeypatch):
+    """Regression check (matching this repo's convention for the
+    retrieval-wiring PR): with `AI_SDLC_AGENT_FRAMEWORK` unset -- the state
+    of every test/CI run -- `ArchitectureAgent()` must still be zero-arg
+    constructible and its `retrieval` capability must be the deterministic
+    mock, exactly as it was before `retrieval_factory` existed."""
+    monkeypatch.delenv(PROVIDER_ENV_VAR, raising=False)
+    agent = ArchitectureAgent()
+    assert isinstance(agent.retrieval, MockRetrievalProvider)
+
+
+def test_retrieval_capability_can_be_injected_directly():
+    injected = MockRetrievalProvider(force_error="provider_failure")
+    agent = ArchitectureAgent(retrieval=injected)
+    assert agent.retrieval is injected
 
 
 def test_valid_requirements_produce_valid_architecture_output():

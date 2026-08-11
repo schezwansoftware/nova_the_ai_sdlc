@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -19,6 +19,20 @@ class CLIConfig(BaseModel):
     port: int = 8000
     initiator_id: str
     current_workflow_id: Optional[str] = None
+    #: Which interchangeable AI agent framework this workspace has chosen
+    #: to use for the capabilities that are actually built as
+    #: swappable-provider integrations (`CodingCapability`,
+    #: `RetrievalCapability` -- see
+    #: `capabilities/providers/coding_factory.py`/`retrieval_factory.py`).
+    #: `None` means "not yet chosen" -- a real, expected state before
+    #: `ai-sdlc init` has resolved it for the first time -- never a silent
+    #: third default; `handlers.run_init` resolves this to a concrete
+    #: value (via `--agent-framework`, a stored prior value, or an
+    #: interactive prompt) before saving. Deliberately excludes the plain
+    #: single-call "think and answer" reasoning step (PO/Architecture/UX's
+    #: `ReasoningCapability`) -- Copilot has no plain-completion API
+    #: equivalent, so that stays Claude-only regardless of this setting.
+    agent_framework: Optional[Literal["claude", "copilot"]] = None
 
 
 def config_dir() -> Path:
