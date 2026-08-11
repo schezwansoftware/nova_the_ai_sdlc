@@ -16,14 +16,19 @@ deterministic, network-free `MockReasoningProvider` (see
 abstraction boundaries and to keep the test suite runnable without
 external credentials.
 
-Note: `ReasoningCapability` and `DesignCapability` each define their own
-`ProviderError`/`MalformedResponseError` classes (not shared) so each
-capability's failure contract stays self-contained; callers that need both
-(e.g. the UX Agent) import each pair from its own module rather than from
-this package's re-exports, to avoid ambiguity between the two.
+Note: `ReasoningCapability`, `DesignCapability`, and `CodingCapability`
+each define their own `ProviderError`/`MalformedResponseError` classes
+(not shared) so each capability's failure contract stays self-contained;
+callers that need more than one (e.g. the UX Agent needs Reasoning +
+Design; the Developer Agent needs Reasoning + Coding, per section 8's
+Tier 3) import each pair from its own module rather than from this
+package's re-exports, to avoid ambiguity between them.
 """
 from __future__ import annotations
 
+from ai_sdlc.capabilities.coding import CodingCapability
+from ai_sdlc.capabilities.coding import MalformedResponseError as CodingMalformedResponseError
+from ai_sdlc.capabilities.coding import ProviderError as CodingProviderError
 from ai_sdlc.capabilities.design import DesignCapability
 from ai_sdlc.capabilities.design import MalformedResponseError as DesignMalformedResponseError
 from ai_sdlc.capabilities.design import ProviderError as DesignProviderError
@@ -40,4 +45,7 @@ __all__ = [
     "DesignCapability",
     "DesignProviderError",
     "DesignMalformedResponseError",
+    "CodingCapability",
+    "CodingProviderError",
+    "CodingMalformedResponseError",
 ]
