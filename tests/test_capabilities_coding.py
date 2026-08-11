@@ -1,33 +1,33 @@
 """Tests for the CodingCapability abstraction and its mock provider.
 
-Mirrors `tests/test_capabilities_reasoning.py`/`tests/test_capabilities_design.py`'s
-structure. No network access / external credentials required anywhere in
-this file. There is no Developer Agent yet to exercise provider-
-independence against (see `coding.py`'s module docstring -- that's
-separate, not-yet-assigned Forge-core work), so these tests exercise the
-capability/provider contract directly instead.
+Mirrors `tests/test_capabilities_design.py`'s structure exactly. No
+network access / external credentials / real Claude Agent SDK required
+anywhere in this file.
 """
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from ai_sdlc.capabilities.coding import (
+    NO_SELF_CHECK_COMMANDS_REASON,
     CodingRequest,
     CodingResult,
     MalformedResponseError,
     ProviderError,
-    ToolPolicy,
+    SelfCheckResult,
+    TerminationReason,
 )
 from ai_sdlc.capabilities.providers.coding_mock import MockCodingProvider
 
 _REQUEST = CodingRequest(
-    task_summary="Add Redis caching to order retrieval",
-    task_brief=(
-        "Add Redis-backed caching for order retrieval endpoints. "
-        "Evict the cache automatically when an order is updated."
-    ),
-    workspace_path="/tmp/fake-workspace/order-service",
-    base_branch="main",
+    task_title="Redis Cache Integration for Order Service",
+    task_summary="Add a Redis-backed cache in front of the order lookup path.",
+    functional_requirements=["Cache order lookups by order id"],
+    components_affected=["OrderService", "OrderCacheConfig"],
+    working_tree_path="/tmp/fake-isolated-worktree",
+    allowed_tools=["Read", "Write", "Edit", "Bash"],
+    allowed_commands=["git", "pytest"],
 )
 
 
@@ -36,43 +36,16 @@ def test_mock_provider_returns_valid_structured_result():
     result = provider.execute(_REQUEST)
 
     assert isinstance(result, CodingResult)
+    assert result.provider_name
     assert result.branch_name.startswith("forge/")
-    assert result.provider_name == "mock_coding_provider"
-    assert len(result.files_changed) > 0
-    assert result.steps_used <= _REQUEST.max_steps
+    assert result.terminated_reason == TerminationReason.COMPLETED
 
 
-def test_mock_provider_skips_self_check_when_no_commands_configured():
+def test_mock_provider_derives_one_file_per_affected_component():
     provider = MockCodingProvider()
     result = provider.execute(_REQUEST)
 
-    assert result.self_check.commands_run == []
-    assert result.self_check.build_passed is None
-    assert result.self_check.tests_passed is None
-    assert result.self_check.skipped_reason is not None
-
-
-def test_mock_provider_runs_self_check_when_commands_configured():
-    request = _REQUEST.model_copy(
-        update={"self_check_commands": ["./gradlew build", "./gradlew test"]}
-    )
-    provider = MockCodingProvider()
-    result = provider.execute(request)
-
-    assert result.self_check.commands_run == ["./gradlew build", "./gradlew test"]
-    assert result.self_check.build_passed is True
-    assert result.self_check.tests_passed is True
-    assert result.self_check.skipped_reason is None
-
-
-def test_mock_provider_force_self_check_failed_reports_failure_without_raising():
-    request = _REQUEST.model_copy(update={"self_check_commands": ["pytest"]})
-    provider = MockCodingProvider(force_error="self_check_failed")
-    result = provider.execute(request)
-
-    assert isinstance(result, CodingResult)
-    assert result.self_check.build_passed is False
-    assert result.self_check.tests_passed is False
+    assert len(result.files_changed) == len(_REQUEST.components_affected)
 
 
 def test_mock_provider_is_deterministic_for_same_request():
@@ -81,7 +54,30 @@ def test_mock_provider_is_deterministic_for_same_request():
     second = provider.execute(_REQUEST)
 
     assert first.branch_name == second.branch_name
-    assert [f.path for f in first.files_changed] == [f.path for f in second.files_changed]
+    assert first.files_changed == second.files_changed
+
+
+def test_mock_provider_skips_self_check_when_no_commands_configured():
+    provider = MockCodingProvider()
+    result = provider.execute(_REQUEST)
+
+    assert result.self_check.build_passed is None
+    assert result.self_check.tests_passed is None
+    assert result.self_check.commands_run == []
+    assert result.self_check.skipped_reason == NO_SELF_CHECK_COMMANDS_REASON
+
+
+def test_mock_provider_runs_self_check_when_commands_configured():
+    request = _REQUEST.model_copy(
+        update={"build_commands": ["make build"], "test_commands": ["pytest"]}
+    )
+    provider = MockCodingProvider()
+    result = provider.execute(request)
+
+    assert result.self_check.build_passed is True
+    assert result.self_check.tests_passed is True
+    assert result.self_check.commands_run == ["make build", "pytest"]
+    assert result.self_check.skipped_reason is None
 
 
 def test_mock_provider_force_malformed_raises_malformed_response_error():
@@ -111,31 +107,63 @@ def test_mock_provider_rejects_unsupported_force_error_value():
         MockCodingProvider(force_error="not_a_real_mode")
 
 
-def test_coding_request_rejects_blank_task_summary():
-    with pytest.raises(Exception):
+def test_coding_request_rejects_empty_allowed_tools():
+    with pytest.raises(ValidationError):
         CodingRequest(
-            task_summary="   ",
-            task_brief="Do something.",
-            workspace_path="/tmp/fake-workspace",
+            task_title="Title",
+            task_summary="Summary",
+            working_tree_path="/tmp/fake",
+            allowed_tools=[],
         )
 
 
-def test_coding_request_rejects_zero_max_steps():
-    with pytest.raises(Exception):
+def test_coding_request_rejects_blank_task_title():
+    with pytest.raises(ValidationError):
         CodingRequest(
-            task_summary="A",
-            task_brief="B",
-            workspace_path="/tmp/fake-workspace",
+            task_title="   ",
+            task_summary="Summary",
+            working_tree_path="/tmp/fake",
+            allowed_tools=["Read"],
+        )
+
+
+def test_coding_request_rejects_non_positive_max_steps():
+    with pytest.raises(ValidationError):
+        CodingRequest(
+            task_title="Title",
+            task_summary="Summary",
+            working_tree_path="/tmp/fake",
+            allowed_tools=["Read"],
             max_steps=0,
         )
 
 
-def test_tool_policy_rejects_empty_allowed_commands():
-    with pytest.raises(Exception):
-        ToolPolicy(allowed_commands=[])
+def test_self_check_skipped_factory_sets_none_not_false():
+    result = SelfCheckResult.skipped("no commands configured")
+    assert result.build_passed is None
+    assert result.tests_passed is None
+    assert result.skipped_reason == "no commands configured"
 
 
-def test_tool_policy_defaults_are_nonempty():
-    policy = ToolPolicy()
-    assert "git" in policy.allowed_commands
-    assert "sudo" in policy.denied_commands
+def test_coding_result_rejects_blank_branch_name():
+    with pytest.raises(ValidationError):
+        CodingResult(
+            branch_name="   ",
+            self_check=SelfCheckResult.skipped(NO_SELF_CHECK_COMMANDS_REASON),
+            provider_name="mock_coding_provider",
+            steps_used=1,
+            terminated_reason=TerminationReason.COMPLETED,
+            summary="Did something.",
+        )
+
+
+def test_coding_result_rejects_negative_steps_used():
+    with pytest.raises(ValidationError):
+        CodingResult(
+            branch_name="forge/example",
+            self_check=SelfCheckResult.skipped(NO_SELF_CHECK_COMMANDS_REASON),
+            provider_name="mock_coding_provider",
+            steps_used=-1,
+            terminated_reason=TerminationReason.COMPLETED,
+            summary="Did something.",
+        )
