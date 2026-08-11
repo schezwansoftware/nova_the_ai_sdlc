@@ -15,13 +15,17 @@ dependencies = [
 
 [project.optional-dependencies]
 # The real GitHub Copilot CodingCapability provider
-# (capabilities/providers/coding_copilot.py). Optional because
+# (capabilities/providers/coding_copilot.py) *and* the real GitHub
+# Copilot RetrievalCapability provider
+# (capabilities/providers/retrieval_copilot.py) -- both drive the same
+# `github-copilot-sdk` package, so one extra covers both; no separate
+# `retrieval_copilot` extra is needed. Optional because
 # `github-copilot-sdk` requires Python 3.11+ -- stricter than this
 # project's own `requires-python = ">=3.10"` -- so environments on 3.10
-# can still install/run ai-sdlc (with the mock coding provider, or a
-# non-Copilot provider) without this extra. Flagged for the project as a
-# whole to resolve: either bump `requires-python` to >=3.11, or accept
-# that the Copilot provider is unavailable on 3.10.
+# can still install/run ai-sdlc (with the mock providers, or non-Copilot
+# providers) without this extra. Flagged for the project as a whole to
+# resolve: either bump `requires-python` to >=3.11, or accept that the
+# Copilot providers are unavailable on 3.10.
 copilot = ["github-copilot-sdk>=1.0.9"]
 
 # The real Anthropic ReasoningCapability provider
