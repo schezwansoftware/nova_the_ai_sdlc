@@ -4,6 +4,54 @@ Tracked from the code review of the Specialist Agent Layer (Craft), branch
 `agents/craft-specialist-agent-layer` (commit `ee8f925`), reviewed 2026-08-10.
 Update/remove items as they're resolved.
 
+## Craft — real Anthropic ReasoningCapability provider (this pass, branch `agents/craft-reasoning-anthropic-provider`)
+
+- [x] `AnthropicReasoningProvider` (`src/ai_sdlc/capabilities/providers/reasoning_anthropic.py`)
+      added: real `ReasoningCapability` provider backed by the Anthropic
+      Messages API's forced tool-use structured output. Verified against
+      the actually-installed `anthropic` package (0.121.0, in a disposable
+      venv) rather than assumed from memory/docs — see that module's own
+      docstring for exactly what was introspected (client/`.messages.create`
+      signature, tool/tool_choice shape, `ToolUseBlock.input` already being
+      a parsed dict, the `APIError`/`AnthropicError` exception hierarchy,
+      and the surprising fact that `anthropic.Anthropic()` does **not**
+      itself fail fast on a missing API key — this provider enforces that
+      itself at `__init__` instead).
+- [x] `get_default_reasoning_provider()` (`src/ai_sdlc/capabilities/providers/reasoning_factory.py`)
+      added and wired into `SpecialistAgent.__init__` (`agents/framework.py`),
+      replacing the hardcoded `MockReasoningProvider()` fallback. Selection
+      is via `AI_SDLC_REASONING_PROVIDER=anthropic|mock` (default `mock`),
+      **not** `--coding-provider`'s per-workspace-config shape — see that
+      module's docstring for the checked-not-assumed reasons why (`--coding-provider`
+      doesn't actually exist in the CLI yet; `CLIConfig` lives in the CLI's
+      own home-directory config and is never reachable from
+      `AgentRegistry._load_impl`'s bare `cls()` construction path or from
+      the separate Core Platform API server process agents actually run
+      in). Flagged in that module for whoever eventually builds real
+      per-workspace `--coding-provider`-style config as the natural place
+      to reconcile this factory, without any agent/test code needing to
+      change.
+- [ ] **Aegis follow-up gap now has a real, not just hypothetical, target:**
+      the existing prompt-injection-sanitization gap noted below for
+      `MockReasoningProvider` (no sanitization of repository/requirement
+      content before it reaches the reasoning capability) now applies to
+      an actual live LLM call once a workspace sets
+      `AI_SDLC_REASONING_PROVIDER=anthropic`, not just a deterministic
+      mock. Still explicitly out of scope for Craft (Aegis owns prompt-
+      injection protection per the architecture doc's ownership table),
+      but worth flagging as higher-priority now that opting in is one
+      environment variable away.
+- [ ] `anthropic` added as an optional extra (`pyproject.toml`,
+      `pip install ai-sdlc[anthropic]`) rather than a base dependency, kept
+      consistent with the mock-is-the-hard-default posture. Not yet wired
+      into any packaging/release/CI matrix that actually installs extras
+      and exercises the real provider end-to-end against a live key — this
+      pass's tests all go through the injected-fake-client seam
+      (`tests/test_reasoning_anthropic_provider.py`), same posture as
+      `ClaudeAgentSDKProvider`'s own tests. A real, credentialed
+      integration test (skipped by default, opt-in via env var) would be a
+      reasonable follow-up for whoever owns CI/release configuration.
+
 ## Craft — UX DesignCapability follow-up (this pass, branch `agents/craft-ux-design-capability`)
 
 - [ ] **Scope note, not a bug:** The UX Agent's `ux_specification` field
