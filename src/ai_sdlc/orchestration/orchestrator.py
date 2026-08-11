@@ -176,6 +176,22 @@ class Orchestrator:
         """
         agent = self.registry.get(agent_id)
         if not agent:
+            # Two different failure modes look identical from `.get()`
+            # alone: no metadata file for `agent_id` was ever found (a
+            # real "not found"), versus metadata was found but the
+            # implementation failed to *construct* (e.g. a real
+            # ReasoningCapability/RetrievalCapability/CodingCapability
+            # provider-selection factory raising ProviderError because a
+            # configured provider's SDK isn't installed). Surfacing
+            # `AgentRegistry.get_load_error()` when present turns a
+            # misleading "Agent not found" into the actual reason, since
+            # this message reaches the caller verbatim (`str(exc)` is
+            # propagated through APIErrorDetail.message unmodified).
+            load_error = self.registry.get_load_error(agent_id)
+            if load_error:
+                raise RuntimeError(
+                    f"Agent '{agent_id}' failed to load: {load_error}"
+                )
             raise RuntimeError(f"Agent not found: {agent_id}")
 
         # Orchestrator owns retry loop deterministically
