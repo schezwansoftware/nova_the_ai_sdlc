@@ -3,6 +3,7 @@ functions; keeping them separate makes the command logic directly testable
 without going through typer's CLI-parsing layer."""
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -75,6 +76,67 @@ def _refresh_and_render(console: Console, client: PlatformClient, workflow_id: s
     formatters.render_pipeline(console, status)
 
 
+#: Env var the spawned Core Platform API subprocess reads to select which
+#: interchangeable AI agent framework (`CodingCapability`/
+#: `RetrievalCapability`) it uses -- see
+#: `capabilities/providers/coding_factory.py`/`retrieval_factory.py`'s
+#: `PROVIDER_ENV_VAR`. Duplicated here as a plain string literal rather
+#: than imported, deliberately: `ai_sdlc.cli` never imports from
+#: `ai_sdlc.capabilities`/`ai_sdlc.agents`/`ai_sdlc.orchestration` (see
+#: `cli/__init__.py`'s module docstring) -- the CLI process only ever sets
+#: this variable in the environment it hands to the spawned server
+#: subprocess, it never needs the factories' own selection logic.
+AGENT_FRAMEWORK_ENV_VAR = "AI_SDLC_AGENT_FRAMEWORK"
+
+_VALID_AGENT_FRAMEWORKS = ("claude", "copilot")
+
+
+def _resolve_agent_framework(
+    console: Console, flag_value: Optional[str], stored_value: Optional[str]
+) -> str:
+    """Resolve `ai-sdlc init`'s one-time "which AI agent framework"
+    choice, in priority order: an explicit `--agent-framework` flag
+    (validated, and always wins even over a previously-stored value);
+    else a value already stored in `CLIConfig` from a prior `init` (so
+    re-running `init` doesn't re-ask); else an interactive prompt when the
+    session is a TTY; else a fail-fast error, mirroring
+    `_resolve_requirement_interactively`'s non-TTY guard in `run_start`.
+    """
+    if flag_value is not None:
+        normalized = flag_value.strip().lower()
+        if normalized not in _VALID_AGENT_FRAMEWORKS:
+            formatters.render_error(
+                console,
+                f"Invalid --agent-framework {flag_value!r}; expected one of {_VALID_AGENT_FRAMEWORKS}.",
+            )
+            raise typer.Exit(code=1)
+        return normalized
+
+    if stored_value is not None:
+        return stored_value
+
+    if not _is_interactive_session():
+        formatters.render_error(
+            console, "No --agent-framework given, nothing stored yet, and this session isn't interactive."
+        )
+        console.print("Pass one explicitly: ai-sdlc init --agent-framework claude|copilot")
+        raise typer.Exit(code=1)
+
+    return _resolve_agent_framework_interactively(console)
+
+
+def _resolve_agent_framework_interactively(console: Console) -> str:
+    """Ask which AI agent framework to use, re-prompting until the answer
+    is one of `_VALID_AGENT_FRAMEWORKS` -- mirrors
+    `_resolve_requirement_interactively`'s retry-until-valid style."""
+    console.print("Which AI agent framework would you like to use? [claude/copilot]")
+    while True:
+        raw = console.input("[bold]> [/bold]").strip().lower()
+        if raw in _VALID_AGENT_FRAMEWORKS:
+            return raw
+        console.print(f"[yellow]Please enter one of: {', '.join(_VALID_AGENT_FRAMEWORKS)}.[/yellow]")
+
+
 def run_init(
     console: Console,
     workspace: Path,
@@ -82,9 +144,20 @@ def run_init(
     port: int,
     initiator_id: Optional[str],
     start_server: bool,
+    agent_framework: Optional[str] = None,
 ) -> None:
     resolved_workspace = workspace.resolve()
     resolved_workspace.mkdir(parents=True, exist_ok=True)
+
+    existing_config = load_config()
+    stored_agent_framework = existing_config.agent_framework if existing_config else None
+
+    try:
+        resolved_agent_framework = _resolve_agent_framework(console, agent_framework, stored_agent_framework)
+    except (KeyboardInterrupt, EOFError):
+        console.print()
+        formatters.render_warning(console, "Cancelled -- ai-sdlc init did not complete.")
+        raise typer.Exit(code=130)
 
     config = CLIConfig(
         workspace=str(resolved_workspace),
@@ -92,6 +165,7 @@ def run_init(
         port=port,
         initiator_id=initiator_id or bootstrap.default_initiator_id(),
         current_workflow_id=None,
+        agent_framework=resolved_agent_framework,
     )
     save_config(config)
     formatters.render_success(console, f"CLI config written to {config_path()}.")
@@ -110,7 +184,19 @@ def run_init(
         return
 
     if start_server:
-        process = bootstrap.spawn_server(resolved_workspace, host, port)
+        server_env = None
+        if config.agent_framework:
+            # Explicit `{**os.environ, ...}` rather than mutating this
+            # process's own `os.environ` -- see `bootstrap.spawn_server`'s
+            # docstring. Unset entirely (not even set to an empty string)
+            # when `agent_framework` was never configured, so the
+            # factories' own "unset means mock" default applies exactly
+            # like `AI_SDLC_REASONING_PROVIDER` already does -- there's no
+            # code path today where `config.agent_framework` is falsy here
+            # (it's always resolved above before `config` is built), but
+            # the guard keeps this block correct if that ever changes.
+            server_env = {**os.environ, AGENT_FRAMEWORK_ENV_VAR: config.agent_framework}
+        process = bootstrap.spawn_server(resolved_workspace, host, port, env=server_env)
         if bootstrap.wait_until_reachable(client):
             formatters.render_success(
                 console, f"Started Core Platform API (pid {process.pid}) at http://{host}:{port}."

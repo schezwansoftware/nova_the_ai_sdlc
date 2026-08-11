@@ -25,7 +25,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Optional
 
 from ai_sdlc.cli.client import PlatformClient
 
@@ -84,11 +84,23 @@ def write_agent_metadata(workspace: Path) -> List[str]:
     return written
 
 
-def spawn_server(workspace: Path, host: str, port: int) -> subprocess.Popen:
+def spawn_server(
+    workspace: Path, host: str, port: int, env: Optional[Dict[str, str]] = None
+) -> subprocess.Popen:
+    """Start the Core Platform API subprocess. `env`, when given, replaces
+    (not merges with) the child's environment -- callers wanting to add to
+    the current process's own environment (e.g. threading
+    `AI_SDLC_AGENT_FRAMEWORK` through from the stored `CLIConfig`, see
+    `handlers.run_init`) must pass an explicit `{**os.environ, ...}` dict
+    themselves. `None` (the default) means "inherit this process's
+    environment unchanged", identical to `subprocess.Popen`'s own default
+    and to this function's behavior before `env` existed -- so every
+    existing caller that doesn't pass it is unaffected."""
     return subprocess.Popen(
         [sys.executable, "-m", "ai_sdlc.platform.server", str(workspace), "--host", host, "--port", str(port)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=env,
     )
 
 
