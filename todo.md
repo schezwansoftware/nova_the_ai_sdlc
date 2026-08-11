@@ -324,11 +324,72 @@ runtime dependency; `pyproject.toml` is unchanged.
       the file-path convenience. Worth adding if requirements commonly
       don't fit on one line comfortably typed at a `>` prompt.
 
-## Sage — follow-up
+## Forge — CodingCapability follow-up (lower priority, PRs #14/#15/#16 merged 2026-08-11)
 
-- [ ] `RetrievalCapability` is entirely deferred — no stub exists yet in
-      `src/ai_sdlc/capabilities/`. Needed before any agent can pull
-      RAG/knowledge context.
+Non-blocking loose ends from the Claude Forge / Copilot Forge `CodingCapability`
+work. Worth picking up once the Developer Agent itself gets scoped, not before.
+
+- [ ] **No `revision_feedback`-equivalent field on `CodingRequest`.** The
+      canonical interface (`src/ai_sdlc/capabilities/coding.py`, PR #14) has
+      no mechanism for threading rejection feedback into a retry call, unlike
+      the UX Agent's `revision_feedback` input-threading pattern (§6, "UX
+      Revision & Feedback Loop"). Surfaced during PR #15's reconciliation
+      pass; deliberately left undecided rather than inventing a field
+      unilaterally. Likely answer: the (not-yet-built) Developer Agent folds
+      rejection feedback into `task_summary`/`acceptance_criteria` before
+      re-calling `execute()` — but that's an assumption, not something either
+      `coding.py` or `claude_sdk.py` states. Resolve when the Developer Agent
+      is actually scoped.
+- [ ] **What triggers push + PR-open after human approval is unresolved.**
+      Both providers stop at "committed locally, not pushed" by design (§4
+      gates this on approval) — but nothing in §3/§4 says what the actual
+      trigger mechanism is: a second `CodingCapability` call, a separate
+      capability method, or something Nexus-owned. Flagged explicitly by
+      Copilot Forge rather than guessed. Needs a real design pass alongside
+      the Developer Agent.
+- [ ] **Neither real provider has been verified against a live, authenticated
+      session** — both are implementation-against-real-installed-types (or,
+      for Claude, docs-only) with no working credentials available in the
+      environment they were built in. `claude_sdk.py`'s `ResultMessage`
+      field access is defensive (`getattr` with fallbacks) pending a real
+      install; `coding_copilot.py`'s wiring tests exercise real SDK classes
+      but never a real `create_session()`/`send_and_wait()` round-trip. Worth
+      a follow-up pass with real credentials before either provider is
+      trusted in anger, not before.
+- [ ] **`github-copilot-sdk` requires Python 3.11+**, stricter than this
+      repo's `pyproject.toml` floor (`>=3.10`) and stricter than the ambient
+      `python3` in the environment this was built in (3.9.6). Added as an
+      optional `[project.optional-dependencies].copilot` extra rather than
+      bumping the base floor, so it's not urgent, but the base-floor/CI story
+      needs a real look before the Copilot provider is anything more than
+      optional.
+
+## Sage — follow-up (RetrievalCapability's *codebase-grounding* portion now built differently — see below)
+
+- [x] ~~`RetrievalCapability` is entirely deferred — no stub exists yet in
+      `src/ai_sdlc/capabilities/`.~~ **Superseded, not simply resolved:**
+      `RetrievalCapability` now exists (PR #18), but its V1 codebase-grounding
+      provider is a read-only harnessed agentic tool (reusing `CodingCapability`'s
+      pattern), not Sage's originally-scoped Tree-Sitter/embedding/hybrid-search
+      index (`docs/architecture/v1_architecture.md` §9/§18 Decision 6, PR #17).
+      That custom-index design remains the documented future/scale upgrade path,
+      not abandoned — pick it up if the harnessed-agent approach proves too slow
+      or expensive at real repo scale (no concrete trigger threshold defined yet,
+      §20 open question 10).
+- [ ] **Jira/Confluence Enterprise Connectors are still entirely deferred**,
+      unaffected by the above — a harnessed coding-agent tool has no native
+      Jira/Confluence awareness, so this gap isn't closed by PR #18 at all.
+      Still Sage's (or Nexus-MCP-adapter) job, still not started.
+- [ ] **Architecture Agent's retrieval call is wired but not reachable in a
+      live workflow yet** (this pass, `agents/craft-architecture-retrieval-wiring`).
+      `ArchitectureAgent._gather_codebase_context()` only calls `RetrievalCapability`
+      when `request.inputs["target_repository"]["workspace_path"]` is present —
+      nothing in Orion's orchestrator currently populates that key when invoking
+      the architecture stage (`invoke_agent_for_stage`/`_make_request` in
+      `orchestration/orchestrator.py` build `inputs` from whatever the caller
+      passes; no caller sets this today). Threading a real workspace path
+      through is Orion's job, not Craft's — until then this is fully
+      backward-compatible dead code (never triggered), not a live feature.
 
 ## Aegis — follow-up
 
