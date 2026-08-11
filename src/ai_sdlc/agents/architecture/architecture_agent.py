@@ -20,6 +20,15 @@ call, identical behavior to before this existed. Threading a real path
 through from a live workflow is Orion's job (populating
 `inputs["target_repository"]["workspace_path"]` when invoking this
 stage), not yet wired -- see `todo.md`.
+
+`retrieval` defaults via `retrieval_factory.get_default_retrieval_provider()`
+-- same one-line "default to whichever provider this workspace/process
+has configured" pattern `agents/framework.py`'s `SpecialistAgent.__init__`
+already uses for `reasoning` via `reasoning_factory`, so this agent stays
+zero-arg constructible (required by `AgentRegistry._load_impl`'s bare
+`cls()` call) while still resolving to a real provider once
+`AI_SDLC_AGENT_FRAMEWORK` is configured -- mock unless a workspace has
+opted into `claude`/`copilot`.
 """
 from __future__ import annotations
 
@@ -29,7 +38,9 @@ from ai_sdlc.agents.architecture.prompts import build_architecture_prompt
 from ai_sdlc.agents.architecture.schemas import ArchitectureOutputData
 from ai_sdlc.agents.base import AgentRequest
 from ai_sdlc.agents.framework import SpecialistAgent
-from ai_sdlc.capabilities.providers.retrieval_mock import MockRetrievalProvider
+from ai_sdlc.capabilities.providers.retrieval_factory import (
+    get_default_retrieval_provider,
+)
 from ai_sdlc.capabilities.reasoning import ReasoningCapability
 from ai_sdlc.capabilities.retrieval import (
     MalformedResponseError as RetrievalMalformedResponseError,
@@ -50,12 +61,12 @@ class ArchitectureAgent(SpecialistAgent):
     ):
         super().__init__(agent_id="architecture", version="1.0", reasoning=reasoning)
         # Same zero-arg-constructible discipline `SpecialistAgent` already
-        # applies to `reasoning` (AgentRegistry._load_impl calls `cls()`),
-        # extended to the new capability: default to the deterministic
-        # mock so this agent never requires real credentials/a real repo
-        # to instantiate, while still letting a caller/test inject a real
-        # or force_error-configured RetrievalCapability.
-        self.retrieval: RetrievalCapability = retrieval or MockRetrievalProvider()
+        # applies to `reasoning`: default to whichever `RetrievalCapability`
+        # this workspace/process has configured (mock unless
+        # `AI_SDLC_AGENT_FRAMEWORK` opts into a real provider), while still
+        # letting a caller/test inject a specific or force_error-configured
+        # instance.
+        self.retrieval: RetrievalCapability = retrieval or get_default_retrieval_provider()
 
     def check_needs_clarification(self, request: AgentRequest) -> Optional[str]:
         inputs: Dict[str, Any] = request.inputs or {}
