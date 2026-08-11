@@ -33,7 +33,9 @@ from ai_sdlc.agents.base import (
     AgentResult,
     AgentStatus,
 )
-from ai_sdlc.capabilities.providers.mock import MockReasoningProvider
+from ai_sdlc.capabilities.providers.reasoning_factory import (
+    get_default_reasoning_provider,
+)
 from ai_sdlc.capabilities.reasoning import (
     MalformedResponseError,
     ProviderError,
@@ -80,13 +82,15 @@ class SpecialistAgent(Agent):
         reasoning: Optional[ReasoningCapability] = None,
     ):
         super().__init__(agent_id=agent_id, version=version)
-        # Default to the deterministic mock provider so every concrete
-        # agent subclass remains zero-arg constructible (required by
-        # AgentRegistry._load_impl, which calls `cls()`), while still
-        # allowing a caller/test to inject a specific ReasoningCapability
-        # (e.g. one configured with force_error=...) to prove the agent
-        # code is provider-independent.
-        self.reasoning: ReasoningCapability = reasoning or MockReasoningProvider()
+        # Default to whichever ReasoningCapability this workspace/process
+        # has configured (see `get_default_reasoning_provider` --
+        # `MockReasoningProvider` unless `AI_SDLC_REASONING_PROVIDER` opts
+        # into a real provider), so every concrete agent subclass remains
+        # zero-arg constructible (required by AgentRegistry._load_impl,
+        # which calls `cls()`), while still allowing a caller/test to
+        # inject a specific ReasoningCapability (e.g. one configured with
+        # force_error=...) to prove the agent code is provider-independent.
+        self.reasoning: ReasoningCapability = reasoning or get_default_reasoning_provider()
 
     # -- hooks for subclasses --------------------------------------------
 

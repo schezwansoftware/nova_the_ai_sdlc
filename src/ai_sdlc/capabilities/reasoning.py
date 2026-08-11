@@ -15,8 +15,9 @@ Conceptually:
     ReasoningProvider Protocol (providers/base.py)
             |
             v
-    Configured provider (providers/mock.py for V1; real vendor clients
-    are deferred/out of scope for this layer)
+    Configured provider (providers/mock.py, the hard default; or
+    providers/reasoning_anthropic.py's AnthropicReasoningProvider, the
+    real V1 provider, selected per `providers/reasoning_factory.py`)
 """
 from __future__ import annotations
 
