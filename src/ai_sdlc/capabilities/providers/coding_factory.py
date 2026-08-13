@@ -19,12 +19,18 @@ because the actual user-facing feature (`ai-sdlc init`'s interactive
 interchangeable-agent-framework capability at once, not a per-capability
 setting. `retrieval_factory.py`'s `get_default_retrieval_provider()`
 reads this exact same variable for the exact same reason -- see that
-module's docstring, intentionally near-identical to this one. (The plain
-single-call `ReasoningCapability` "think and answer" step is explicitly
-*not* part of this shared choice: Copilot has no plain-completion API
-equivalent to pick between, only an agentic/session-based one like
-Claude's, so reasoning provider selection stays on its own separate
-`AI_SDLC_REASONING_PROVIDER` env var, untouched by this module.)
+module's docstring, intentionally near-identical to this one.
+`reasoning_factory.py`'s `get_default_reasoning_provider()` also reads
+this exact same variable now: an earlier version of this paragraph
+argued the plain single-call `ReasoningCapability` "think and answer"
+step should stay on its own separate `AI_SDLC_REASONING_PROVIDER` env
+var, on the theory that "Copilot has no plain-completion API equivalent
+to pick between." That theory was wrong -- see `reasoning_factory.py`'s
+module docstring for the correction (`reasoning_copilot.py`'s
+`CopilotReasoningProvider` uses the same bounded-agentic-session
+technique this package's other Copilot providers already use, no literal
+single-completion endpoint required) -- so reasoning selection is not, in
+fact, untouched by this variable; all three factories now share it.
 
 ## Selection mechanism: why a plain environment variable at all
 
@@ -45,8 +51,11 @@ One thing has changed since that argument was written, though:
 into the spawned server subprocess's environment as
 `AI_SDLC_AGENT_FRAMEWORK` explicitly, via `bootstrap.spawn_server`'s
 `env=` parameter -- rather than relying on an operator to `export
-AI_SDLC_REASONING_PROVIDER=...` by hand the way the reasoning provider
-still does. This factory doesn't care how the variable got set (by the
+AI_SDLC_AGENT_FRAMEWORK=...` by hand. (At the time this paragraph was
+first written, `reasoning_factory.py` still read a separate, manually-set
+`AI_SDLC_REASONING_PROVIDER` variable with no CLI-side threading of its
+own; that's no longer the case -- see `reasoning_factory.py`'s module
+docstring.) This factory doesn't care how the variable got set (by the
 CLI, or by an operator's shell directly -- identical either way): it only
 ever reads `os.environ`, so that CLI-side improvement is transparent to
 it and required no change here beyond there being a CLI layer worth

@@ -190,9 +190,10 @@ def run_init(
             # process's own `os.environ` -- see `bootstrap.spawn_server`'s
             # docstring. Unset entirely (not even set to an empty string)
             # when `agent_framework` was never configured, so the
-            # factories' own "unset means mock" default applies exactly
-            # like `AI_SDLC_REASONING_PROVIDER` already does -- there's no
-            # code path today where `config.agent_framework` is falsy here
+            # factories' own "unset means mock" default applies -- this
+            # covers reasoning_factory.py too, which reads this exact same
+            # variable, not a separate one. There's no code path today
+            # where `config.agent_framework` is falsy here
             # (it's always resolved above before `config` is built), but
             # the guard keeps this block correct if that ever changes.
             server_env = {**os.environ, AGENT_FRAMEWORK_ENV_VAR: config.agent_framework}
