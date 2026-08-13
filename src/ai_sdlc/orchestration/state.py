@@ -129,6 +129,11 @@ class StateStore:
 
     @contextlib.contextmanager
     def _locked(self, exclusive: bool = True):
+        # Same self-healing reasoning as `_atomic_write_text` -- if the
+        # whole `.ai-sdlc/` tree (not just one subdirectory under it) was
+        # deleted out from under this long-lived StateStore, `os.open`
+        # with O_CREAT still needs the *parent* directory to exist.
+        self.state_dir.mkdir(parents=True, exist_ok=True)
         lock_fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             if fcntl is not None:
@@ -143,6 +148,29 @@ class StateStore:
             os.close(lock_fd)
 
     def _atomic_write_text(self, path: Path, content: str) -> None:
+        # `__init__` creates `workflows_dir`/`approvals_dir`/etc. once, at
+        # StateStore construction time -- but this is a long-lived server
+        # process (spawned once by `cli/bootstrap.py:spawn_server` and left
+        # running, with no lifecycle tying it to any particular caller), so
+        # nothing re-verifies those directories still exist on every write.
+        # If the workspace's `.ai-sdlc/` tree is deleted out from under a
+        # running server (e.g. a stale, still-running server from an
+        # earlier `--start-server` -- `init` only spawns a new one if the
+        # configured host:port isn't already reachable, so a leftover
+        # process from a previous run keeps serving against a workspace
+        # that's since been recreated), `os.replace()` below fails with
+        # ENOENT on the *destination* directory, not something recoverable
+        # by retrying the write itself. Recreating the parent directory
+        # defensively here -- the same `mkdir(parents=True, exist_ok=True)`
+        # `__init__` already uses -- makes every write self-healing against
+        # this instead of surfacing a confusing raw ENOENT.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # `self.state_dir` itself (not just `path.parent`) could be the
+        # thing that's gone missing -- e.g. the whole `.ai-sdlc/` tree was
+        # removed, not just one subdirectory -- and the temp file below is
+        # created directly inside it, before `path.parent` is even
+        # touched. Same defensive recreation, same reasoning as above.
+        self.state_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.state_dir, delete=False) as handle:
             handle.write(content)
             temp_path = Path(handle.name)
@@ -184,6 +212,11 @@ class StateStore:
         event.setdefault("timestamp", utc_now_iso())
         line = json.dumps(event, ensure_ascii=False)
         with self._locked(exclusive=True):
+            # Same self-healing reasoning as `_atomic_write_text` -- this
+            # doesn't go through it (append mode, not atomic-replace), but
+            # is exposed to the identical "directory deleted out from under
+            # a long-lived server" failure mode.
+            self.audit_path.mkdir(parents=True, exist_ok=True)
             with self.audit_file.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
 
