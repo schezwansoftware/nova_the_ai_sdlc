@@ -211,6 +211,40 @@ def test_command_basename_normalizes_paths_and_args():
     assert _command_basename("") == ""
 
 
+# -- final-event summary extraction -------------------------------------------
+#
+# Regression coverage for a real bug found via live testing against the
+# installed github-copilot-sdk==1.0.9: `send_and_wait` returns a
+# `SessionEvent` whose actual text lives at `.data.content` (an
+# `AssistantMessageData`), never at a top-level `.result`/`.summary` --
+# see `session.py`'s own docstring example (`match response.data: case
+# AssistantMessageData() as data: print(data.content)`), verified live
+# against a real authenticated session. `_build_coding_result` previously
+# read the wrong path and silently fell back to the generic
+# "Applied changes for: ..." summary on every real Copilot call.
+
+
+def test_build_coding_result_extracts_summary_from_event_data_content(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    provider = CopilotCodingProvider()
+    request = _make_request(repo)
+    final_event = {"data": {"content": "Implemented the health endpoint and added a test."}}
+    result = provider._build_coding_result(request, final_event, steps_used=3, max_steps=40)
+    assert result.summary == "Implemented the health endpoint and added a test."
+
+
+def test_build_coding_result_falls_back_to_generic_summary_when_no_content(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    provider = CopilotCodingProvider()
+    request = _make_request(repo)
+    result = provider._build_coding_result(request, final_event=None, steps_used=1, max_steps=40)
+    assert result.summary == f"Applied changes for: {request.task_title}."
+
+
 # -- user-input auto-answer fallback ------------------------------------------
 
 

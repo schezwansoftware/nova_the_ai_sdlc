@@ -275,13 +275,23 @@ class CopilotReasoningProvider(ReasoningCapability):
         timeout = max(_MIN_SESSION_TIMEOUT_SECONDS, self.max_steps * _STEP_TO_SECONDS_FACTOR)
 
         client = _copilot_sdk.CopilotClient(use_logged_in_user=True)
-        await client.start()
+        # `timeout` above only bounds `send_and_wait` below -- `client.start()`/
+        # `create_session()` have no timeout of their own in the SDK, and were
+        # verified live (via `coding_copilot.py`'s equivalent session setup)
+        # to take several minutes on a cold path, far past this provider's own
+        # configured budget with no error signal. Bounding them here with the
+        # same overall budget is what makes that budget actually mean
+        # something end to end, not just for the final message-wait step.
+        await asyncio.wait_for(client.start(), timeout=timeout)
         try:
-            session = await client.create_session(
-                on_permission_request=self._make_permission_handler(),
-                on_user_input_request=self._make_user_input_handler(),
-                model=self.model,
-                available_tools=[],
+            session = await asyncio.wait_for(
+                client.create_session(
+                    on_permission_request=self._make_permission_handler(),
+                    on_user_input_request=self._make_user_input_handler(),
+                    model=self.model,
+                    available_tools=[],
+                ),
+                timeout=timeout,
             )
             try:
                 final_event = await session.send_and_wait(
@@ -343,7 +353,7 @@ class CopilotReasoningProvider(ReasoningCapability):
         this callback is belt-and-suspenders, not the load-bearing
         mechanism."""
 
-        async def handler(perm_request: Any):
+        async def handler(perm_request: Any, _invocation: Any = None):
             kind = _field(perm_request, "kind")
             return _copilot_rpc.PermissionDecisionReject(
                 feedback=(
@@ -359,7 +369,7 @@ class CopilotReasoningProvider(ReasoningCapability):
         "final structured verdict, no human in the loop" model every other
         provider in this package establishes."""
 
-        async def handler(request: Any):
+        async def handler(request: Any, _metadata: Any = None):
             choices = _field(request, "choices", None) or []
             if choices:
                 answer, was_freeform = choices[0], False
@@ -379,7 +389,7 @@ class CopilotReasoningProvider(ReasoningCapability):
     # -- post-session verdict -----------------------------------------------
 
     def _parse_result(self, final_event: Any, output_schema: Type[SchemaT]) -> SchemaT:
-        raw_text = _field(final_event, "result", None) or _field(final_event, "summary", None)
+        raw_text = _field(_field(final_event, "data"), "content")
         if not isinstance(raw_text, str) or not raw_text.strip():
             raise MalformedResponseError(
                 "copilot_reasoning_provider: session ended without a usable text result"

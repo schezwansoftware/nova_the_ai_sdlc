@@ -14,9 +14,13 @@ import socket
 import subprocess
 import sys
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+import questionary
+from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.output import DummyOutput
 from typer.testing import CliRunner
 
 from ai_sdlc.cli import bootstrap
@@ -140,22 +144,66 @@ def test_init_agent_framework_flag_is_case_insensitive_and_rejects_unrecognized_
     assert "Invalid --agent-framework" in bad_result.output
 
 
-def test_init_agent_framework_prompts_interactively_and_retries_on_invalid_input(
+@contextmanager
+def _patch_select_menu_keys(monkeypatch: pytest.MonkeyPatch, keys: str):
+    """`questionary.select()` (built on `prompt_toolkit`) can't be driven
+    by Click/Typer's `CliRunner(..., input=...)` at all -- confirmed
+    directly: piping text through `CliRunner` makes `unsafe_ask()` raise
+    `EOFError` immediately, even for otherwise-valid input, because
+    `prompt_toolkit` needs to read raw key sequences (including escape
+    sequences for arrow keys) through its own input abstraction, not
+    Click's stdin-substitution mechanism. `prompt_toolkit.input.
+    create_pipe_input()` is the library's own supported way to simulate
+    that for tests. `keys` is the raw sequence to feed -- e.g. `"\\n"` for
+    "accept the default (first) choice", `"\\x1b[B\\n"` for "down-arrow
+    then Enter" to pick the second choice.
+    """
+    monkeypatch.setattr("ai_sdlc.cli.handlers._is_interactive_session", lambda: True)
+    with create_pipe_input() as pipe_input:
+        pipe_input.send_text(keys)
+        real_select = questionary.select
+
+        def _select_with_pipe(*args, **kwargs):
+            kwargs.setdefault("input", pipe_input)
+            kwargs.setdefault("output", DummyOutput())
+            return real_select(*args, **kwargs)
+
+        monkeypatch.setattr("ai_sdlc.cli.handlers.questionary.select", _select_with_pipe)
+        yield
+
+
+def test_init_agent_framework_prompts_via_select_menu_default_choice(
     tmp_path: Path, cli_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """No free-text validation/retry to test here anymore -- a
+    `questionary.select()` menu can only ever return one of
+    `_VALID_AGENT_FRAMEWORKS`, there's no "invalid answer" path a user
+    can reach. Bare Enter accepts the first listed choice (`claude`)."""
+    # Note: the menu's own rendered prompt text isn't asserted here -- it's
+    # drawn through `DummyOutput()` (see `_patch_select_menu_keys`), which
+    # discards rendering by design (that's what makes this test hermetic
+    # rather than needing a real terminal); only the *returned selection*
+    # is observable, which is exactly what matters for this test.
     workspace = tmp_path / "repo"
-    monkeypatch.setattr("ai_sdlc.cli.handlers._is_interactive_session", lambda: True)
-
-    result = runner.invoke(
-        app,
-        ["init", "--workspace", str(workspace)],
-        input="not-a-real-framework\nclaude\n",
-    )
+    with _patch_select_menu_keys(monkeypatch, "\n"):
+        result = runner.invoke(app, ["init", "--workspace", str(workspace)])
 
     assert result.exit_code == 0, result.output
-    assert "Which AI agent framework would you like to use?" in result.output
-    assert "Please enter one of" in result.output  # re-prompted after the bad answer
     assert load_config().agent_framework == "claude"
+
+
+def test_init_agent_framework_prompts_via_select_menu_arrow_key_navigation(
+    tmp_path: Path, cli_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pressing down-arrow then Enter moves off the default (`claude`) and
+    selects the second listed choice (`copilot`) -- proves real menu
+    navigation works, not just accepting whatever's pre-selected."""
+    workspace = tmp_path / "repo"
+    with _patch_select_menu_keys(monkeypatch, "\x1b[B\n"):
+        result = runner.invoke(app, ["init", "--workspace", str(workspace)])
+
+    assert result.exit_code == 0, result.output
+    assert load_config().agent_framework == "copilot"
 
 
 def test_init_agent_framework_non_interactive_without_flag_fails_fast(

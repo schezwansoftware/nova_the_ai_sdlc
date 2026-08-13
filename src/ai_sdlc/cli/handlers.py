@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import questionary
 import typer
 from rich.console import Console
 
@@ -126,15 +127,24 @@ def _resolve_agent_framework(
 
 
 def _resolve_agent_framework_interactively(console: Console) -> str:
-    """Ask which AI agent framework to use, re-prompting until the answer
-    is one of `_VALID_AGENT_FRAMEWORKS` -- mirrors
-    `_resolve_requirement_interactively`'s retry-until-valid style."""
-    console.print("Which AI agent framework would you like to use? [claude/copilot]")
-    while True:
-        raw = console.input("[bold]> [/bold]").strip().lower()
-        if raw in _VALID_AGENT_FRAMEWORKS:
-            return raw
-        console.print(f"[yellow]Please enter one of: {', '.join(_VALID_AGENT_FRAMEWORKS)}.[/yellow]")
+    """Ask which AI agent framework to use via an arrow-key select menu
+    (`questionary`) rather than free-text input -- there's nothing to
+    validate/retry here the way `_resolve_requirement_interactively`'s
+    text prompt needs to, since a select menu can only return one of
+    `_VALID_AGENT_FRAMEWORKS` in the first place.
+
+    Uses `unsafe_ask()`, not `ask()`: `ask()` swallows Ctrl-C/Ctrl-D
+    internally and returns `None`, which would silently hand a `None`
+    choice back to `_resolve_agent_framework`. `unsafe_ask()` lets
+    `KeyboardInterrupt`/`EOFError` propagate instead, so `run_init`'s
+    existing `except (KeyboardInterrupt, EOFError)` wrapper around this
+    call keeps handling cancellation exactly like every other interactive
+    prompt in this module, with no special-casing needed here.
+    """
+    return questionary.select(
+        "Which AI agent framework would you like to use?",
+        choices=list(_VALID_AGENT_FRAMEWORKS),
+    ).unsafe_ask()
 
 
 def run_init(
