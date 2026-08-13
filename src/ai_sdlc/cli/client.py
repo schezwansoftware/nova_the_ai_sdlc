@@ -39,8 +39,29 @@ class ConnectionUnavailable(Exception):
     """The CLI could not reach the Core Platform API at all."""
 
 
+#: Default request timeout. This used to be 15.0 -- fine while every
+#: provider was the deterministic mock, but a real Reasoning call
+#: (`AI_SDLC_AGENT_FRAMEWORK=claude`/`copilot`) can legitimately take up
+#: to ~120s on its own (`reasoning_copilot.py`'s
+#: `max(_MIN_SESSION_TIMEOUT_SECONDS, max_steps * _STEP_TO_SECONDS_FACTOR)`,
+#: and `reasoning_anthropic.py`'s real API round-trip), and a single
+#: `start_workflow`/`submit_clarification`/`submit_approval` call can
+#: silently chain through *multiple* stages in one HTTP request/response
+#: (`LangGraphRunner.run()` auto-advances through every already-completed
+#: stage before returning) -- confirmed live: a real 3-stage
+#: (PO/Architecture/UX) Copilot-backed run took ~43s end to end, and the
+#: old 15s default made the CLI report "timed out" even though the server
+#: went on to finish the work correctly moments later. 600s gives
+#: comfortable headroom for a few chained real stages without pretending
+#: a hard number can cover every future case -- see `handlers.py`'s
+#: "this may take a while" messaging for how the CLI keeps this from
+#: *feeling* frozen in the meantime, since a long timeout alone doesn't
+#: fix that.
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 600.0
+
+
 class PlatformClient:
-    def __init__(self, host: str, port: int, timeout: float = 15.0):
+    def __init__(self, host: str, port: int, timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS):
         self.host = host
         self.port = port
         self.timeout = timeout
