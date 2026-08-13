@@ -17,11 +17,12 @@ seam, mirroring `reasoning_factory.py`'s
 interchangeable-agent-framework capability at once, not a per-capability
 setting. `coding_factory.py`'s `get_default_coding_provider()` reads this
 exact same variable for the exact same reason -- see that module's
-docstring, intentionally near-identical to this one. (The plain
-single-call `ReasoningCapability` "think and answer" step is explicitly
-*not* part of this shared choice -- see `coding_factory.py`'s docstring
-for why -- so reasoning provider selection stays on its own separate
-`AI_SDLC_REASONING_PROVIDER` env var, untouched by this module.)
+docstring, intentionally near-identical to this one. `reasoning_factory.py`'s
+`get_default_reasoning_provider()` also reads this exact same variable
+now (an earlier version kept reasoning selection on its own separate
+`AI_SDLC_REASONING_PROVIDER` env var -- see `reasoning_factory.py`'s
+module docstring for why that was corrected), untouched by this module
+either way -- all three factories share one selection variable.
 
 `ProviderError`/ `MalformedResponseError` are deliberately **not**
 imported from `coding.py`/`coding_factory.py` even though the shape here

@@ -84,7 +84,8 @@ class SpecialistAgent(Agent):
         super().__init__(agent_id=agent_id, version=version)
         # Default to whichever ReasoningCapability this workspace/process
         # has configured (see `get_default_reasoning_provider` --
-        # `MockReasoningProvider` unless `AI_SDLC_REASONING_PROVIDER` opts
+        # `MockReasoningProvider` unless `AI_SDLC_AGENT_FRAMEWORK` (the same
+        # single preference CodingCapability/RetrievalCapability read) opts
         # into a real provider), so every concrete agent subclass remains
         # zero-arg constructible (required by AgentRegistry._load_impl,
         # which calls `cls()`), while still allowing a caller/test to

@@ -20,27 +20,53 @@ Update/remove items as they're resolved.
 - [x] `get_default_reasoning_provider()` (`src/ai_sdlc/capabilities/providers/reasoning_factory.py`)
       added and wired into `SpecialistAgent.__init__` (`agents/framework.py`),
       replacing the hardcoded `MockReasoningProvider()` fallback. Selection
-      is via `AI_SDLC_REASONING_PROVIDER=anthropic|mock` (default `mock`),
-      **not** `--coding-provider`'s per-workspace-config shape — see that
-      module's docstring for the checked-not-assumed reasons why (`--coding-provider`
-      doesn't actually exist in the CLI yet; `CLIConfig` lives in the CLI's
-      own home-directory config and is never reachable from
-      `AgentRegistry._load_impl`'s bare `cls()` construction path or from
-      the separate Core Platform API server process agents actually run
-      in). Flagged in that module for whoever eventually builds real
-      per-workspace `--coding-provider`-style config as the natural place
-      to reconcile this factory, without any agent/test code needing to
-      change.
-- [ ] **Aegis follow-up gap now has a real, not just hypothetical, target:**
-      the existing prompt-injection-sanitization gap noted below for
-      `MockReasoningProvider` (no sanitization of repository/requirement
-      content before it reaches the reasoning capability) now applies to
-      an actual live LLM call once a workspace sets
-      `AI_SDLC_REASONING_PROVIDER=anthropic`, not just a deterministic
-      mock. Still explicitly out of scope for Craft (Aegis owns prompt-
-      injection protection per the architecture doc's ownership table),
-      but worth flagging as higher-priority now that opting in is one
-      environment variable away.
+      was originally via a reasoning-specific `AI_SDLC_REASONING_PROVIDER=
+      anthropic|mock` (default `mock`) env var, **not**
+      `--coding-provider`'s per-workspace-config shape — justified at the
+      time by "Copilot has no equivalent single-completion API," so
+      reasoning was kept off the shared `AI_SDLC_AGENT_FRAMEWORK` switch
+      `coding_factory.py`/`retrieval_factory.py` use.
+      **Corrected** (branch `agents/craft-reasoning-copilot-unify`): that
+      justification was wrong on both counts. `CopilotReasoningProvider`
+      (`src/ai_sdlc/capabilities/providers/reasoning_copilot.py`) now
+      exists — it doesn't need a literal single-call completion endpoint,
+      it uses the same "bounded agentic session, one task, prompt-instruct
+      structured output" technique `retrieval_copilot.py` already
+      established, just extracting an arbitrary caller-supplied schema
+      out of a fenced JSON block instead of a fixed summary+sources
+      shape. And `reasoning_factory.py` now reads `AI_SDLC_AGENT_FRAMEWORK`
+      — the exact same variable `coding_factory.py`/`retrieval_factory.py`
+      read — instead of its own separate variable, so `ai-sdlc init`'s one
+      "which AI agent framework" choice actually governs every AI call the
+      platform makes, reasoning included, not just coding/codebase-lookup.
+      `AI_SDLC_REASONING_PROVIDER` was removed entirely (no deprecated
+      alias kept — nothing deployed depends on it). `"claude"` still means
+      `AnthropicReasoningProvider` for reasoning specifically (Anthropic's
+      Messages API remains the right real backend for a single-call
+      reasoning completion regardless of which framework name selects it);
+      `"copilot"` now means `CopilotReasoningProvider`. See
+      `reasoning_factory.py`'s module docstring for the full account, and
+      `reasoning_copilot.py`'s for what was verified against the same
+      installed `github-copilot-sdk==1.0.9` package `coding_copilot.py`/
+      `retrieval_copilot.py` already introspect (notably: `available_
+      tools=[]` at session-create time is a structural, verified-not-
+      guessed "zero tools available" guarantee — stronger than either of
+      those two providers' kind-based permission allow/deny approach,
+      since there's no concrete builtin tool-name string to mis-guess when
+      the allowlist is simply empty). The original per-workspace-config
+      reasoning above (why an environment variable at all, not a direct
+      `CLIConfig` read) was correct and is preserved, just no longer tied
+      to a reasoning-specific variable.
+- [x] ~~**Aegis follow-up gap now has a real, not just hypothetical,
+      target:**~~ still applies, now against either real provider: none of
+      `MockReasoningProvider`'s existing prompt-injection-sanitization gap
+      (no sanitization of repository/requirement content before it reaches
+      the reasoning capability) is addressed by `AnthropicReasoningProvider`
+      or `CopilotReasoningProvider` either — both pass `prompt` straight
+      through. Still explicitly out of scope for Craft (Aegis owns
+      prompt-injection protection per the architecture doc's ownership
+      table), but worth flagging as higher-priority now that opting into
+      either real provider is one environment variable away.
 - [ ] `anthropic` added as an optional extra (`pyproject.toml`,
       `pip install ai-sdlc[anthropic]`) rather than a base dependency, kept
       consistent with the mock-is-the-hard-default posture. Not yet wired
@@ -51,6 +77,13 @@ Update/remove items as they're resolved.
       `ClaudeAgentSDKProvider`'s own tests. A real, credentialed
       integration test (skipped by default, opt-in via env var) would be a
       reasonable follow-up for whoever owns CI/release configuration.
+      `reasoning_copilot.py` reuses the existing `copilot` extra (no new
+      extra needed — same `github-copilot-sdk` dependency
+      `coding_copilot.py`/`retrieval_copilot.py` already require) and is in
+      the same boat: `tests/test_capabilities_reasoning_copilot.py` exercises
+      real installed SDK classes at the permission/prompt/parsing level, but
+      no live, authenticated `create_session()`/`send_and_wait()` round-trip
+      has been run against it.
 
 ## Craft — UX DesignCapability follow-up (this pass, branch `agents/craft-ux-design-capability`)
 

@@ -8,16 +8,22 @@ four capabilities: `mock.py` (`MockReasoningProvider`), `design_mock.py`
 default everywhere nothing has been explicitly configured (every test,
 CI, and any workspace that hasn't opted in -- see `reasoning_factory.py`).
 
-`reasoning_anthropic.py` (`AnthropicReasoningProvider`) is
-`ReasoningCapability`'s real V1 provider, backed by the Anthropic
-Messages API's forced tool-use structured output -- selected over the
-mock via `reasoning_factory.get_default_reasoning_provider()` when a
-workspace sets `AI_SDLC_REASONING_PROVIDER=anthropic`. Real
-`DesignCapability` providers (OpenAI/other multimodal/image-generation
-services, design-tool adapters such as a future Nexus-owned Figma
-integration, ...) remain out of scope for Craft and are deferred to be
-added later behind the `DesignProvider` (`design_base.py`) protocol,
-without any change required to agent code.
+`reasoning_anthropic.py` (`AnthropicReasoningProvider`) and
+`reasoning_copilot.py` (`CopilotReasoningProvider`) are
+`ReasoningCapability`'s two real providers, backed by the Anthropic
+Messages API's forced tool-use structured output and a bounded, zero-tool
+`github/copilot-sdk` session respectively -- selected over the mock via
+`reasoning_factory.get_default_reasoning_provider()` when a workspace
+sets `AI_SDLC_AGENT_FRAMEWORK=claude` or `AI_SDLC_AGENT_FRAMEWORK=copilot`
+-- the same single environment variable `CodingCapability`/
+`RetrievalCapability` below read, not a reasoning-specific switch (an
+earlier version of this factory used a separate `AI_SDLC_REASONING_
+PROVIDER` variable; see `reasoning_factory.py`'s module docstring for why
+that was corrected). Real `DesignCapability` providers (OpenAI/other
+multimodal/image-generation services, design-tool adapters such as a
+future Nexus-owned Figma integration, ...) remain out of scope for Craft
+and are deferred to be added later behind the `DesignProvider`
+(`design_base.py`) protocol, without any change required to agent code.
 
 `CodingCapability` and `RetrievalCapability` are different: harnessing a
 real agentic coding tool *is* both capabilities' V1 scope (section 18
