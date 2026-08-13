@@ -177,19 +177,32 @@ def test_extract_json_payload_raises_value_error_when_top_level_is_not_an_object
 
 
 def test_parse_result_returns_validated_schema_instance():
+    # Shape verified against the real installed github-copilot-sdk==1.0.9:
+    # `send_and_wait` returns a `SessionEvent` whose `.data` is an
+    # `AssistantMessageData` carrying `.content` -- never a top-level
+    # `.result`/`.summary` (see `session.py`'s own docstring example:
+    # `match response.data: case AssistantMessageData() as data: print(data.content)`).
     provider = CopilotReasoningProvider()
-    final_event = {"result": '```json\n{"title": "A title", "items": ["x"]}\n```'}
+    final_event = {"data": {"content": '```json\n{"title": "A title", "items": ["x"]}\n```'}}
     result = provider._parse_result(final_event, _DummySchema)
     assert isinstance(result, _DummySchema)
     assert result.title == "A title"
     assert result.items == ["x"]
 
 
-def test_parse_result_falls_back_to_summary_field():
+def test_parse_result_reads_attribute_style_event_not_just_dict():
+    # The real SDK objects are attribute-bearing dataclasses, not dicts --
+    # this is the shape production code actually sees; the dict-shaped
+    # tests above/below exercise `_field`'s other supported shape.
+    class _Data:
+        content = '```json\n{"title": "From object", "items": []}\n```'
+
+    class _Event:
+        data = _Data()
+
     provider = CopilotReasoningProvider()
-    final_event = {"summary": '{"title": "From summary", "items": []}'}
-    result = provider._parse_result(final_event, _DummySchema)
-    assert result.title == "From summary"
+    result = provider._parse_result(_Event(), _DummySchema)
+    assert result.title == "From object"
 
 
 def test_parse_result_raises_malformed_when_no_text_result():
@@ -198,15 +211,23 @@ def test_parse_result_raises_malformed_when_no_text_result():
         provider._parse_result({}, _DummySchema)
 
 
+def test_parse_result_raises_malformed_when_final_event_is_none():
+    # `send_and_wait` is documented to return `None` when no assistant
+    # message was ever received (idle with no reply).
+    provider = CopilotReasoningProvider()
+    with pytest.raises(MalformedResponseError):
+        provider._parse_result(None, _DummySchema)
+
+
 def test_parse_result_raises_malformed_when_text_is_not_parseable_json():
     provider = CopilotReasoningProvider()
     with pytest.raises(MalformedResponseError):
-        provider._parse_result({"result": "not json at all"}, _DummySchema)
+        provider._parse_result({"data": {"content": "not json at all"}}, _DummySchema)
 
 
 def test_parse_result_raises_malformed_when_payload_fails_schema_validation():
     provider = CopilotReasoningProvider()
-    final_event = {"result": '```json\n{"title": "missing items field"}\n```'}
+    final_event = {"data": {"content": '```json\n{"title": "missing items field"}\n```'}}
     with pytest.raises(MalformedResponseError):
         provider._parse_result(final_event, _DummySchema)
 

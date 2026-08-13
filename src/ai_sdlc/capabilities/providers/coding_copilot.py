@@ -294,13 +294,24 @@ class CopilotCodingProvider(CodingCapability):
             working_directory=request.working_tree_path,
             use_logged_in_user=True,
         )
-        await client.start()
+        # `timeout` above only bounds `send_and_wait` below -- `client.start()`/
+        # `create_session()` have no timeout of their own in the SDK, and were
+        # verified live to take several minutes (session/workspace startup
+        # against a working tree, not the model call itself) on a cold path --
+        # far past this provider's own configured budget with no error
+        # signal. Bounding them here with the same overall budget is what
+        # makes that budget actually mean something end to end, not just for
+        # the final message-wait step.
+        await asyncio.wait_for(client.start(), timeout=timeout)
         try:
-            session = await client.create_session(
-                on_permission_request=self._make_permission_handler(request),
-                on_user_input_request=self._make_user_input_handler(),
-                model=self.model,
-                working_directory=request.working_tree_path,
+            session = await asyncio.wait_for(
+                client.create_session(
+                    on_permission_request=self._make_permission_handler(request),
+                    on_user_input_request=self._make_user_input_handler(),
+                    model=self.model,
+                    working_directory=request.working_tree_path,
+                ),
+                timeout=timeout,
             )
             try:
                 final_event = await session.send_and_wait(
@@ -375,7 +386,7 @@ class CopilotCodingProvider(CodingCapability):
         allowed_tools = request.allowed_tools
         allowed_commands = request.allowed_commands
 
-        async def handler(perm_request: Any):
+        async def handler(perm_request: Any, _invocation: Any = None):
             kind = _field(perm_request, "kind")
 
             if kind == "shell":
@@ -411,7 +422,7 @@ class CopilotCodingProvider(CodingCapability):
         return handler
 
     def _make_user_input_handler(self):
-        async def handler(request: Any):
+        async def handler(request: Any, _metadata: Any = None):
             question = _field(request, "question", "") or ""
             choices = _field(request, "choices", None) or []
             self._clarification_log.append(question)
@@ -451,7 +462,7 @@ class CopilotCodingProvider(CodingCapability):
         files_changed = self._files_changed(request.working_tree_path, request.base_branch)
         self_check = self._run_self_check(request)
 
-        summary_text = _field(final_event, "result", None) or _field(final_event, "summary", None)
+        summary_text = _field(_field(final_event, "data"), "content")
         summary = summary_text if isinstance(summary_text, str) and summary_text.strip() else (
             f"Applied changes for: {request.task_title}."
         )

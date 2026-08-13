@@ -305,13 +305,24 @@ class CopilotRetrievalProvider(RetrievalCapability):
             working_directory=request.repository_path,
             use_logged_in_user=True,
         )
-        await client.start()
+        # `timeout` above only bounds `send_and_wait` below -- `client.start()`/
+        # `create_session()` have no timeout of their own in the SDK, and were
+        # verified live (via `coding_copilot.py`'s equivalent session setup)
+        # to take several minutes on a cold working-directory path, far past
+        # this provider's own configured budget with no error signal.
+        # Bounding them here with the same overall budget is what makes that
+        # budget actually mean something end to end, not just for the final
+        # message-wait step.
+        await asyncio.wait_for(client.start(), timeout=timeout)
         try:
-            session = await client.create_session(
-                on_permission_request=self._make_permission_handler(),
-                on_user_input_request=self._make_user_input_handler(),
-                model=self.model,
-                working_directory=request.repository_path,
+            session = await asyncio.wait_for(
+                client.create_session(
+                    on_permission_request=self._make_permission_handler(),
+                    on_user_input_request=self._make_user_input_handler(),
+                    model=self.model,
+                    working_directory=request.repository_path,
+                ),
+                timeout=timeout,
             )
             try:
                 final_event = await session.send_and_wait(
@@ -380,7 +391,7 @@ class CopilotRetrievalProvider(RetrievalCapability):
         field, matching `retrieval_claude.py`'s own "permission surface
         is fixed by the capability, not caller policy" stance."""
 
-        async def handler(perm_request: Any):
+        async def handler(perm_request: Any, _invocation: Any = None):
             kind = _field(perm_request, "kind")
             if kind in _ALLOWED_KINDS:
                 return _copilot_rpc.PermissionDecisionApproveOnce(approved_interactively=False)
@@ -399,7 +410,7 @@ class CopilotRetrievalProvider(RetrievalCapability):
         `coding_copilot.py`'s equivalent handler establishes -- adapted
         for a read-only grounding query instead of a coding task."""
 
-        async def handler(request: Any):
+        async def handler(request: Any, _metadata: Any = None):
             question = _field(request, "question", "") or ""
             choices = _field(request, "choices", None) or []
             if choices:
@@ -442,7 +453,7 @@ class CopilotRetrievalProvider(RetrievalCapability):
     ) -> RetrievalResult:
         terminated_reason = self._map_termination(final_event, steps_used, max_steps)
 
-        raw_text = _field(final_event, "result", None) or _field(final_event, "summary", None)
+        raw_text = _field(_field(final_event, "data"), "content")
         if isinstance(raw_text, str) and raw_text.strip():
             summary, snippets = _extract_sources_section(raw_text)
         else:

@@ -76,6 +76,48 @@ def test_retrieve_accepts_directory_without_git(tmp_path):
     provider._verify_repository_path(str(plain_dir))  # must not raise
 
 
+# -- final-event summary extraction -------------------------------------------
+#
+# Regression coverage for a real bug found via live testing against the
+# installed github-copilot-sdk==1.0.9: `send_and_wait` returns a
+# `SessionEvent` whose actual text lives at `.data.content` (an
+# `AssistantMessageData`), never at a top-level `.result`/`.summary` --
+# see `session.py`'s own docstring example (`match response.data: case
+# AssistantMessageData() as data: print(data.content)`), verified live
+# against a real authenticated session. `_build_retrieval_result`
+# previously read the wrong path and silently fell back to the "No
+# context could be derived" summary on every real Copilot call.
+
+
+def test_build_retrieval_result_extracts_summary_from_event_data_content(tmp_path):
+    provider = CopilotRetrievalProvider()
+    request = _make_request(tmp_path)
+    final_event = {
+        "data": {
+            "content": (
+                "The cache is invalidated on order update.\n\nSOURCES:\n"
+                "- src/order_service/cache.py:10-20 — defines the invalidation handler"
+            )
+        }
+    }
+    result = provider._build_retrieval_result(
+        request, final_event, steps_used=2, max_steps=20, max_context_tokens=4000
+    )
+    assert "cache is invalidated" in result.context_summary
+    assert len(result.snippets) == 1
+    assert result.snippets[0].source_path == "src/order_service/cache.py"
+
+
+def test_build_retrieval_result_falls_back_when_no_content(tmp_path):
+    provider = CopilotRetrievalProvider()
+    request = _make_request(tmp_path)
+    result = provider._build_retrieval_result(
+        request, final_event=None, steps_used=1, max_steps=20, max_context_tokens=4000
+    )
+    assert result.context_summary == f"No context could be derived for: {request.query}"
+    assert result.snippets == []
+
+
 # -- permission handler: only "read" is ever approved --------------------------
 
 
