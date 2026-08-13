@@ -16,6 +16,7 @@ import sys
 import threading
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Optional
 
 import pytest
 import questionary
@@ -59,7 +60,13 @@ def cli_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return config_dir
 
 
-def _write_config(config_dir: Path, workspace: Path, port: int, initiator_id: str = "u1") -> None:
+def _write_config(
+    config_dir: Path,
+    workspace: Path,
+    port: int,
+    initiator_id: str = "u1",
+    agent_framework: Optional[str] = None,
+) -> None:
     save_config(
         CLIConfig(
             workspace=str(workspace),
@@ -67,6 +74,7 @@ def _write_config(config_dir: Path, workspace: Path, port: int, initiator_id: st
             port=port,
             initiator_id=initiator_id,
             current_workflow_id=None,
+            agent_framework=agent_framework,
         )
     )
 
@@ -366,6 +374,38 @@ def test_happy_path_start_reaches_completed(real_agents_server, cli_config_dir: 
     status_result = runner.invoke(app, ["status"])
     assert status_result.exit_code == 0, status_result.output
     assert "Workflow completed" in status_result.output
+
+
+def test_start_prints_thinking_hint_when_agent_framework_configured(
+    real_agents_server, cli_config_dir: Path
+) -> None:
+    """A "this may take a while" hint precedes any call that can trigger
+    real agent execution, once a workspace has actually opted into a real
+    agent framework -- see `client.py`'s `DEFAULT_REQUEST_TIMEOUT_SECONDS`
+    docstring for why that call can legitimately be slow now instead of
+    failing fast at the old 15s default. `real_agents_server` never sets
+    `AI_SDLC_AGENT_FRAMEWORK` server-side, so every agent here still uses
+    the deterministic mock -- this test only proves the *hint* fires off
+    the stored CLI-side preference, not that a real provider ran."""
+    workspace, port = real_agents_server
+    _write_config(cli_config_dir, workspace, port=port, agent_framework="claude")
+
+    start_result = runner.invoke(app, ["start", "--prompt", _REQUIREMENT_TEXT])
+
+    assert start_result.exit_code == 0, start_result.output
+    assert "Thinking (using claude)" in start_result.output
+
+
+def test_start_omits_thinking_hint_when_agent_framework_not_configured(
+    real_agents_server, cli_config_dir: Path
+) -> None:
+    workspace, port = real_agents_server
+    _write_config(cli_config_dir, workspace, port=port, agent_framework=None)
+
+    start_result = runner.invoke(app, ["start", "--prompt", _REQUIREMENT_TEXT])
+
+    assert start_result.exit_code == 0, start_result.output
+    assert "Thinking" not in start_result.output
 
 
 def test_start_without_prompt_asks_interactively_and_rejects_too_short_text(

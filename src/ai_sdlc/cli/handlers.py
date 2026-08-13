@@ -247,6 +247,7 @@ def run_start(console: Console, prompt: Optional[str], project_context: Optional
             raise typer.Exit(code=130)
 
     client = _client_for(config)
+    _print_thinking_hint(console, config)
     try:
         data = client.start_workflow(config.initiator_id, prompt, project_context or {})
     except ConnectionUnavailable as exc:
@@ -260,6 +261,26 @@ def run_start(console: Console, prompt: Optional[str], project_context: Optional
     save_config(config)
     formatters.render_success(console, f"Started workflow {data.workflow_id}.")
     _drive_workflow_interactively(console, client, config, data.workflow_id)
+
+
+def _print_thinking_hint(console: Console, config: CLIConfig) -> None:
+    """Print a one-line "this may take a while" note before a call that
+    can trigger real agent execution (`start_workflow`/
+    `submit_clarification`/`submit_approval` -- any call that can advance
+    the workflow). Only when `agent_framework` is actually configured:
+    the mock providers every test/CI run uses are effectively
+    instantaneous, so this would be pure noise there. See `client.py`'s
+    `DEFAULT_REQUEST_TIMEOUT_SECONDS` docstring for why the call this
+    precedes can now legitimately take a while instead of failing fast --
+    this message is what keeps that wait from *feeling* like a frozen
+    terminal, which a longer timeout alone doesn't fix.
+    """
+    if not config.agent_framework:
+        return
+    console.print(
+        f"[dim]Thinking (using {config.agent_framework}) -- this can take a "
+        "moment for a real model call...[/dim]"
+    )
 
 
 def _resolve_requirement_interactively(console: Console) -> str:
@@ -369,6 +390,7 @@ def _prompt_and_submit_clarification(
     response_text = console.input("[bold]Your answer:[/bold] ").strip()
     while not response_text:
         response_text = console.input("[bold]Your answer (required):[/bold] ").strip()
+    _print_thinking_hint(console, config)
     data = client.submit_clarification(workflow_id, config.initiator_id, question_id, response_text)
     formatters.render_success(console, data.message)
 
@@ -387,6 +409,7 @@ def _prompt_and_submit_approval(
         while not feedback:
             feedback = console.input("[bold]Reason for rejection (required):[/bold] ").strip()
 
+    _print_thinking_hint(console, config)
     data = client.submit_approval(workflow_id, config.initiator_id, approval_id, approved, feedback)
     formatters.render_success(console, data.message)
 
