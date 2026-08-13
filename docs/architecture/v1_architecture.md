@@ -25,7 +25,8 @@ The platform operates as an orchestrated multi-agent network designed to convert
 - **Pluggable Visual Design Providers:** Visual design generation is implemented through a provider-agnostic design capability, not by hard-coding model vendors or design applications such as Figma. A Figma integration, if introduced later, is a distinct Nexus-owned provider implementation rather than the default architecture.
 - **File-Based Standards Layer for Org/Project Conventions:** Organization- and project-specific conventions (approved libraries, coding style, documentation format, UI/UX libraries, backend architecture, code review format) are captured as git-versioned `instructions.md` + domain-scoped `skills/*.md` files, resolved org → project and injected directly into agent prompts — not retrieved via RAG. Sage's RAG index is reserved for large, unstructured, or fast-changing knowledge (the codebase, Confluence, Jira) that can't be hand-curated into a file. See §9.1.
 - **Agent Capability Tiers, Not a Uniform Capability Set:** Agents only get the capability surface their job actually requires — pure reasoning (PO), reasoning plus read-only grounding (Architecture, Review, Documentation), or reasoning plus isolated write/execute access (the Developer Agent). An agent that only ever judges or advises never receives worktree or command-execution rights. See §8.
-- **V1 Providers: Real Single-Call Reasoning, and Retrieval via a Read-Only Harnessed Agent, Not a Built-From-Scratch RAG Stack:** `ReasoningCapability`'s V1 provider is a real single request/response call to a hosted LLM (Anthropic), replacing the deterministic mock for real usage. `RetrievalCapability`'s V1 provider, for the codebase-grounding portion, reuses the exact same agentic-tool-harnessing pattern already built for `CodingCapability` (§8 Decision 4) — the same class of tool, just permissioned read-only (no edit/write/execute tools, no command execution), asked to explore the target repository and return a structured context summary instead of a code diff. This was chosen over building Sage's originally-scoped custom Tree-Sitter/embedding/hybrid-search index from scratch for V1, because the harness already exists and these tools are already competent at codebase exploration — the custom index remains a valid future upgrade path if the harnessed-agent approach proves too slow or expensive at scale, not a requirement to ship first. See §8, §9, §18 Decision 6.
+- **V1 Providers: Real Reasoning, and Retrieval via a Read-Only Harnessed Agent, Not a Built-From-Scratch RAG Stack:** `ReasoningCapability`'s V1 providers are real, replacing the deterministic mock for real usage. `RetrievalCapability`'s V1 provider, for the codebase-grounding portion, reuses the exact same agentic-tool-harnessing pattern already built for `CodingCapability` (§8 Decision 4) — the same class of tool, just permissioned read-only (no edit/write/execute tools, no command execution), asked to explore the target repository and return a structured context summary instead of a code diff. This was chosen over building Sage's originally-scoped custom Tree-Sitter/embedding/hybrid-search index from scratch for V1, because the harness already exists and these tools are already competent at codebase exploration — the custom index remains a valid future upgrade path if the harnessed-agent approach proves too slow or expensive at scale, not a requirement to ship first. See §8, §9, §18 Decision 6.
+- **One Agent-Framework Preference Governs Every AI Call, With Neither Option Privileged as "Default":** A workspace picks an AI agent framework — Claude or GitHub Copilot — once, at `ai-sdlc init --agent-framework`, and that single choice governs `ReasoningCapability`, `CodingCapability`, and `RetrievalCapability` uniformly. Neither framework is architecturally preferred: each capability has a complete, real, tested provider for both, built to the same shared interface. The two frameworks differ in *how* each provider is implemented internally (a hosted LLM's completion API vs. a harnessed agentic-tool session, per capability), never in what a workspace can choose. Mock stays the hard default when nothing is configured — that default is about test/CI safety, not about favoring one real provider over the other. See §8, §12.
 - **CLI-First with API Boundary:** V1 delivers a local CLI interfacing directly with the platform engine via a local JSON-RPC / REST contract over IPC/HTTP, guaranteeing full GUI compatibility without refactoring core orchestration logic.
 
 ---
@@ -303,7 +304,7 @@ The Developer Agent does not implement its own code-generation or code-execution
 
 Once the provider finishes (or exhausts its retry/step budget), the Developer Agent runs the target codebase's own build/test commands as a self-check, then packages the diff as a pending artifact and requests approval through the existing mechanism — it does not push a branch or open a PR until that approval is granted. On approval, it pushes the isolated branch and opens the PR (the platform's stated end product, per §1) — this is a real PR a human merges through normal GitHub review, never a silent local merge. On rejection, the same revision-loop pattern UX already uses applies: the feedback is threaded back in as an additional input, and the Developer Agent produces a new attempt.
 
-Provider choice (which agentic coding tool backs `CodingCapability` for a given workspace) is a setting captured once at `ai-sdlc init`, not re-asked per workflow — see §12's `--coding-provider` option and §20's resolved Copilot-integration question.
+Provider choice (which agentic coding tool backs `CodingCapability` for a given workspace) is a setting captured once at `ai-sdlc init`, not re-asked per workflow — see §12's `--agent-framework` option (§8.1: the same choice also governs `ReasoningCapability`/`RetrievalCapability`, not a coding-specific flag) and §20's resolved Copilot-integration question.
 
 #### Input Contract (`DeveloperAgentInput`)
 
@@ -334,7 +335,7 @@ Provider choice (which agentic coding tool backs `CodingCapability` for a given 
     "instructions": "...merged org → project instructions.md content...",
     "skills": ["backend-architecture.md"]
   },
-  "coding_provider": "configured at ai-sdlc init, not chosen per-call"
+  "agent_framework": "configured once at ai-sdlc init --agent-framework, not chosen per-call"
 }
 ```
 
@@ -1001,25 +1002,44 @@ For V1, visual design generation means a provider-backed AI capability that prod
 
 ## 8. AI Capability Architecture
 
-The system decouples **Agents**, **Capabilities**, and **LLM Models** to prevent vendor lock-in.
+The system decouples **Agents**, **Capabilities**, and **AI agent frameworks** to prevent vendor lock-in. The diagram below reflects what's actually implemented, not an aspirational fallback/routing layer:
 
 ```
-Agent Layer               PO Agent / UX Agent / Developer Agent / Security Agent
+Agent Layer               PO Agent / Architecture Agent / UX Agent / Developer Agent (Forge)
                                          │
                                          ▼
 Capability Layer  [ Reasoning ] [ Coding ] [ Retrieval ] [ Design ]
                                          │
                                          ▼
-Capability Router    Fallback & Guardrail Validation Layer
+Provider-Selection Factory   One shared switch (§8.1) selects Mock / Claude / Copilot
                                          │
                    ┌─────────────────────┼─────────────────────┐
                    ▼                     ▼                     ▼
-Model Layer     Anthropic             OpenAI               Local / Ollama
-              (Claude 3.5)          (GPT-4o)             (DeepSeek / Llama)
+              Mock provider        Claude provider        Copilot provider
+           (deterministic, the   (hosted LLM completion  (harnessed agentic
+            hard default when    for Reasoning; harnessed  session for Coding/
+            nothing's configured) agentic session for       Retrieval; same for
+                                   Coding/Retrieval)          Reasoning)
 
 ```
 
-`DesignCapability` is a new capability abstraction used by the UX Agent when it needs to generate or refine visual design artifacts. It is intentionally provider-agnostic and may be implemented by a multimodal LLM, an image-generation provider, or a design-service adapter. The Capability Router resolves the request to the best available provider, applies policy guards, and may fall back to a secondary provider if the preferred provider is unavailable or rate-limited. The UX Agent contract remains stable because the capability interface exposes a normalized request/response envelope rather than vendor-specific APIs.
+There is no automatic fallback between providers — an explicitly-configured real provider that fails (missing credentials, SDK not installed, network error) raises loudly (`ProviderError`/`MalformedResponseError`) rather than silently retrying against a different one. Silent fallback across vendors was in an earlier draft of this diagram; it was never built and doesn't match how §8.1's factories actually behave, so this revision drops it rather than leave stale, inaccurate diagram text standing.
+
+`DesignCapability` is a new capability abstraction used by the UX Agent when it needs to generate or refine visual design artifacts. It is intentionally provider-agnostic and may be implemented by a multimodal LLM, an image-generation provider, or a design-service adapter. It is **not** governed by the Claude/Copilot agent-framework preference below — Figma/multimodal-image providers are a separate, Nexus-owned axis (§18 Decision 3), not one of the two AI agent frameworks this section otherwise covers. The UX Agent contract remains stable because the capability interface exposes a normalized request/response envelope rather than vendor-specific APIs.
+
+### 8.1 One Agent-Framework Preference Governs Reasoning, Coding, and Retrieval
+
+A workspace chooses an AI agent framework — `claude` or `copilot` — exactly once, via `ai-sdlc init --agent-framework` (§12). That single choice is threaded into the spawned Core Platform API server process as one environment variable (`AI_SDLC_AGENT_FRAMEWORK`), and every one of the three capability-selection factories (`reasoning_factory.py`, `coding_factory.py`, `retrieval_factory.py`) reads the *same* variable — not three independent settings a workspace has to configure separately, and not one capability quietly defaulting to a different vendor than the other two.
+
+Neither framework is privileged as "the default" among the real options — both have a complete provider for all three capabilities, built to the same interface:
+
+| Capability | Claude provider | Copilot provider |
+| --- | --- | --- |
+| `ReasoningCapability` | Hosted LLM completion call (Anthropic Messages API, forced tool-use for structured output) | Harnessed agentic session, one task, structured answer extracted from the final response |
+| `CodingCapability` | Harnessed Claude Agent SDK session, isolated working tree, allow-listed tools/commands | Harnessed GitHub Copilot SDK session, same isolation/allow-list discipline |
+| `RetrievalCapability` | Harnessed Claude Agent SDK session, read-only (no edit/write/execute tools granted) | Harnessed GitHub Copilot SDK session, same read-only discipline |
+
+The two frameworks differ in *implementation shape* per capability (a single hosted completion call for Claude's reasoning, vs. a bounded agentic session for everything else) — never in whether a workspace is allowed to choose one over the other. `mock` remains the hard, unconditional default when `AI_SDLC_AGENT_FRAMEWORK` is unset — every test and CI run gets this automatically — but that default exists for test/CI safety, not because a real workspace is expected to prefer it, and it is not evidence that Claude or Copilot is the "more supported" real option.
 
 `CodingCapability` is the Developer Agent's equivalent seam, and it is deliberately shaped differently from `ReasoningCapability`/`DesignCapability`: those are single request/response calls (prompt or design brief in, one validated result out), but writing code into an existing repository is inherently iterative — the provider needs to read files, decide what to change, edit, run commands, and react to the results before it's actually done. `CodingCapability` therefore wraps a provider's own bounded agentic loop (read/edit/run-command, repeated until done or a step limit is hit) rather than a single completion. Nova does not implement this loop itself: V1's provider harnesses an existing agentic coding tool programmatically (invoked unattended, scoped to an isolated working tree and an explicit allowed-tool/command list — see §4, §10), the same way `DesignCapability`'s provider calls out to an existing image/design vendor rather than Nova generating pixels itself. The Developer Agent's contract stays stable regardless of which coding tool backs the configured provider, for the same reason the UX Agent's contract stays stable across design providers: the capability interface returns a normalized envelope (§4's `DeveloperAgentOutput`), never a provider-specific result shape.
 
@@ -1032,7 +1052,7 @@ Not every agent needs the same capability surface, and handing an agent more tha
 | Tier | Capabilities | Agents | Read/Grounding | Write/Execute |
 | --- | --- | --- | --- | --- |
 | **Tier 1 — Reasoning only** | `ReasoningCapability` | PO | Only what's already in `inputs` (raw requirement, prior clarifications) | None |
-| **Tier 2 — Reasoning + read-only grounding** | `ReasoningCapability` + `RetrievalCapability` | Architecture, Review, Documentation | §9's Knowledge Engine — codebase (Tree-Sitter/AST), Jira, Confluence — via one hybrid RAG query, same seam regardless of which source the answer lives in | None. No working tree, no sandbox, no tool/command allow-list — these agents only ever return a structured judgment or artifact, never a file edit. |
+| **Tier 2 — Reasoning + read-only grounding** | `ReasoningCapability` + `RetrievalCapability` | Architecture, Review, Documentation | §9's V1 harnessed read-only agent for the codebase (Claude or Copilot, per the shared §8.1 preference); Jira/Confluence still deferred (§9) | None. No working tree, no sandbox, no tool/command allow-list — these agents only ever return a structured judgment or artifact, never a file edit. |
 | **Tier 3 — Reasoning + write + execute** | `ReasoningCapability` + `CodingCapability` | Developer Agent (Forge); Testing, once built | Everything Tier 2 has, plus the target repository itself via the isolated working tree | Isolated Git worktree, allow-listed tool/command execution (§10) — never the initiator's live checkout, never surfaced outside the existing approval gate (§6) |
 
 The dividing line isn't "does this agent need context" — every agent past Tier 1 does — it's "does this agent need to *act* on the target repository." UX sits alongside Tier 2's no-target-repo-write boundary: it layers `DesignCapability` (§18 Decision 3) on top of `ReasoningCapability` to generate visual artifacts, but those artifacts persist into platform state (`.ai-sdlc/`) via the State & Schema Engine, never into the target codebase, so it doesn't need Tier 3's worktree/execute model either.
@@ -1047,7 +1067,7 @@ Consumed by Tier 2 and Tier 3 agents (§8) via `RetrievalCapability`, distinct f
 
 ### V1 Provider: Harnessed Read-Only Agent for Codebase Grounding
 
-For V1, the codebase-grounding portion of `RetrievalCapability` is **not** a custom-built search index. It reuses `CodingCapability`'s already-built agentic-tool-harnessing pattern (§8, §18 Decision 4), permissioned strictly read-only: no edit, write, or command-execution tools are granted, so the provider can explore (read files, search, follow references) but structurally cannot modify the target repository. Given a query, it runs its own internal explore-then-summarize loop and returns one structured, token-budgeted context result — same single-call shape as every other capability, per §8's addendum above. This was chosen over building the dual-index design below from scratch for V1: the harness already exists (built once for `CodingCapability`, reused here rather than duplicated), and these tools are already competent at "explore a codebase and explain what's relevant" — the exact job this capability needs done. See §18 Decision 6 for the full reasoning and what would justify moving off it later.
+For V1, the codebase-grounding portion of `RetrievalCapability` is **not** a custom-built search index. It reuses `CodingCapability`'s already-built agentic-tool-harnessing pattern (§8, §18 Decision 4), permissioned strictly read-only: no edit, write, or command-execution tools are granted, so the provider can explore (read files, search, follow references) but structurally cannot modify the target repository. Given a query, it runs its own internal explore-then-summarize loop and returns one structured, token-budgeted context result — same single-call shape as every other capability, per §8's addendum above. This was chosen over building the dual-index design below from scratch for V1: the harness already exists (built once for `CodingCapability`, reused here rather than duplicated), and these tools are already competent at "explore a codebase and explain what's relevant" — the exact job this capability needs done. See §18 Decision 6 for the full reasoning and what would justify moving off it later. As with `CodingCapability`, this has both a Claude-backed and a Copilot-backed implementation, selected by the same §8.1 preference — neither is "the" harnessed-agent provider, both satisfy this design equally.
 
 **Enterprise Connectors (Jira/Confluence) are unaffected by this choice and remain entirely deferred** — nothing currently syncs either source; a harnessed coding-agent tool has no native Jira/Confluence awareness, so that gap isn't closed by this decision at all. Building that sync (owned by **Sage**, or built as a **Nexus**-owned MCP/tool-adapter integration the harnessed provider can call into, per §7) is separate, unstarted work regardless of which codebase-grounding approach is used.
 
@@ -1186,7 +1206,7 @@ The V1 user experience is powered by a CLI built on `typer` and `rich`, invoking
 
 ### Commands
 
-- `ai-sdlc init`: Initializes `.ai-sdlc/` state folder, agent registry metadata, and local CLI config in the target application repository; optionally starts the Core Platform API server as a background process (`--start-server`). Also captures which `CodingCapability` provider the Developer Agent should use for this workspace (`--coding-provider`, e.g. an agentic-coding-tool harness for V1), a once-per-workspace setting rather than something re-asked per workflow (§4, §8). Deliberately kept **separate** from `start` — set up once, start as many workflows afterward as needed.
+- `ai-sdlc init`: Initializes `.ai-sdlc/` state folder, agent registry metadata, and local CLI config in the target application repository; optionally starts the Core Platform API server as a background process (`--start-server`). Also captures which AI agent framework — `claude` or `copilot` — backs `ReasoningCapability`/`CodingCapability`/`RetrievalCapability` for this workspace (`--agent-framework claude|copilot`; interactive prompt if omitted and nothing is stored yet — see §8.1), a once-per-workspace setting rather than something re-asked per workflow (§4, §8). Deliberately kept **separate** from `start` — set up once, start as many workflows afterward as needed.
 - `ai-sdlc start --prompt "<requirement>"`: The primary human-facing entry point. Calls `start_workflow()`, then **drives the workflow interactively to completion in one continuous session** rather than returning after a single stage (see §12.1 for the loop).
 - `ai-sdlc status`, `answer`, `approve`, `reject`, `cancel`: Discrete, scriptable commands mirroring `get_workflow_status()` / `submit_clarification()` / `submit_approval()` / `cancel_workflow()` 1:1. These remain available as manual escape hatches — resuming a session interrupted mid-loop (e.g. Ctrl-C), CI/non-interactive use, or driving a workflow from outside the interactive session — but a human is no longer expected to reach for them as the primary way to drive a workflow.
 
@@ -1256,7 +1276,7 @@ Phase 2: Specialist Agents & Capabilities (Craft / Sage / Forge)
    │      tools/commands) rather than a custom-built code-execution engine
    ├── Wire the Developer Agent as a fourth graph node (Orion), reachable only once
    │      `design_package_status == APPROVED` (§6)
-   └── Add `--coding-provider` selection to `ai-sdlc init` (Pixel, §12)
+   └── Add `--agent-framework` selection to `ai-sdlc init` (Pixel, §12, §8.1)
 
 Phase 3: Security, QA & Integration (Aegis / Sentinel / Nexus)
    ├── Integrate design-provider credentials via Nexus adapters
@@ -1327,6 +1347,6 @@ Phase 3: Security, QA & Integration (Aegis / Sentinel / Nexus)
 8. **Coding-Provider Retry/Step Budget:** §8's agentic loop needs a bounded step/attempt limit (mirroring `Orchestrator`'s existing `max_attempts` retry ceiling for specialist agents) so a provider that can't converge fails cleanly instead of running indefinitely — what should that limit be, and is it configurable per workspace or fixed platform-wide?
 9. **Testing Agent's Exact Tier Placement:** §8 provisionally places the (not yet built) Testing Agent in Tier 3 alongside Forge, assuming it authors test code directly via the same write+execute worktree model. An alternative is a narrower Tier 2.5: read-only grounding plus *execute-only* rights (run the existing test suite, no source edits) — closer to a CI runner than a coding agent. Which shape is correct depends on whether "Testing" means "writes new tests" or "runs and reports on existing ones," which hasn't been scoped yet.
 10. **`RetrievalCapability` Graduation Trigger:** §9/§18 Decision 6 defer Sage's custom dual-index provider until the V1 harnessed-agent provider "proves too slow or too expensive" — no concrete threshold (repo size, latency budget, per-call cost ceiling) is defined for when that's actually true. Needs a real number once there's usage data to set one against, not before.
-11. **`ReasoningCapability`/`RetrievalCapability` Provider Selection Mechanism:** §1's key-decisions list commits to real V1 providers for both, but not yet to *how* a workspace opts into them over the mock defaults — whether this reuses `ai-sdlc init`'s existing `--coding-provider`-style per-workspace setting (one consistent "which provider backs which capability" story) or needs its own separate flag/config per capability. Resolve when building the provider-selection factory.
+11. ~~**`ReasoningCapability`/`RetrievalCapability` Provider Selection Mechanism**~~ **Resolved:** one mechanism, not per-capability ones — `ai-sdlc init --agent-framework claude|copilot` (interactive prompt if omitted, one-time, re-running `init` reuses the stored value), threaded into the spawned server process as `AI_SDLC_AGENT_FRAMEWORK`, read identically by `reasoning_factory.py`/`coding_factory.py`/`retrieval_factory.py`. See §8.1. An earlier pass initially left `ReasoningCapability` on a separate `AI_SDLC_REASONING_PROVIDER` variable and Claude-only — both were mistakes, corrected here: every capability reads the same variable, and Copilot has a complete `ReasoningCapability` provider too (a harnessed single-task session, same technique as its Coding/Retrieval providers), not just Claude.
 
 ---
