@@ -137,6 +137,23 @@ class SpecialistAgent(Agent):
             # existing retry mechanism.
             raise AgentExecutionError(str(exc), retryable=True) from exc
 
+        # `check_needs_clarification()` above is a cheap pre-LLM gate (empty
+        # input, obviously-too-short, etc.) -- it never sees the model's own
+        # judgment. `needs_clarification` is the reasoning call itself
+        # deciding, after actually reasoning over a well-formed-but-still-
+        # ambiguous input, that it cannot proceed without asking. Every
+        # concrete `output_schema` declares this field (see
+        # `agents/*/schemas.py`); a schema that doesn't would just never
+        # trip this (`getattr` default `False`), not error.
+        if getattr(data, "needs_clarification", False):
+            return AgentResult(
+                request_id=request.request_id,
+                workflow_id=request.workflow_id,
+                agent_id=self.agent_id,
+                status=AgentStatus.NEEDS_CLARIFICATION,
+                questions=[data.clarification_question],
+            )
+
         extras = self.build_result_extras(request, data)
         return AgentResult(
             request_id=request.request_id,

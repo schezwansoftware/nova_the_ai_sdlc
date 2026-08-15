@@ -29,15 +29,26 @@ Constraints:
 - Explicitly list anything the requirement does not cover as
   out-of-scope, so reviewers know what will NOT be delivered.
 - Acceptance criteria must be objectively verifiable.
-- If the requirement is too vague or incomplete to produce a meaningful
-  structured specification, do not guess -- a clarification question
-  should be raised instead (this decision is made before this prompt is
-  ever sent; by the time you are reasoning over this prompt, the input has
-  already been judged sufficient).
+- The most extreme cases (no input text at all, or a handful of words with
+  no real content) are already filtered before this prompt is ever sent --
+  by the time you are reasoning over this prompt, the input has cleared
+  that bar. That does not mean it is unambiguous: if it is still missing
+  something you cannot reasonably assume (e.g. it names a feature but
+  gives no way to tell who it's for or what "done" means), do not guess --
+  use `needs_clarification` below instead. Reserve this for a real
+  blocker, not a minor unstated detail; prefer stating a reasonable
+  assumption and proceeding whenever you can.
 """
 
 OUTPUT_STRUCTURE = """\
 Produce a structured requirements specification with exactly these fields:
+- needs_clarification: true only if the requirement is genuinely too
+  ambiguous to produce a meaningful structured specification without
+  guessing at something important. When true, set clarification_question
+  to one specific, answerable question and leave the fields below
+  empty/minimal -- they are not used. Default to false.
+- clarification_question: required, non-empty, when needs_clarification is
+  true; otherwise unused.
 - feature_title: a short, human-readable title for the requirement
 - summary: 1-2 sentence summary of what is being built and why
 - functional_requirements: list of concrete, testable functional requirements

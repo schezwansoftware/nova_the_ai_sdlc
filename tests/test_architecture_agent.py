@@ -16,7 +16,30 @@ from ai_sdlc.agents.po.po_agent import POAgent
 from ai_sdlc.capabilities.providers.mock import MockReasoningProvider
 from ai_sdlc.capabilities.providers.retrieval_factory import PROVIDER_ENV_VAR
 from ai_sdlc.capabilities.providers.retrieval_mock import MockRetrievalProvider
+from ai_sdlc.capabilities.reasoning import ReasoningCapability
 from ai_sdlc.orchestration.orchestrator import AgentExecutionError
+
+
+class _StubClarifyingReasoning(ReasoningCapability):
+    """See test_po_agent.py's identical stub for why this exists: a real
+    model deciding, after actually reasoning over a well-formed-but-still-
+    ambiguous prompt, that it needs to ask something -- the pre-LLM
+    `check_needs_clarification()` gate can never see this (it only checks
+    whether `requirements` is present/well-formed, never its content)."""
+
+    def __init__(self, question: str):
+        self.question = question
+
+    def complete(self, prompt, *, output_schema):
+        return output_schema(
+            needs_clarification=True,
+            clarification_question=self.question,
+            tech_stack=[],
+            component_changes=[],
+            decisions=[],
+            rationale="",
+            risks=[],
+        )
 
 
 def _make_request(inputs, workflow_id="wf-arch-test"):
@@ -96,6 +119,19 @@ def test_empty_requirements_dict_needs_clarification():
     assert result.status == AgentStatus.NEEDS_CLARIFICATION
 
 
+def test_model_driven_clarification_on_well_formed_but_ambiguous_requirements():
+    agent = ArchitectureAgent(
+        reasoning=_StubClarifyingReasoning("Should this scale to multi-region, or is single-region acceptable?")
+    )
+    request = _make_request({"requirements": _SAMPLE_REQUIREMENTS})
+
+    result = agent.execute(request)
+
+    assert result.status == AgentStatus.NEEDS_CLARIFICATION
+    assert result.questions == ["Should this scale to multi-region, or is single-region acceptable?"]
+    assert result.data is None
+
+
 def test_forced_malformed_provider_output_raises_retryable_agent_execution_error():
     agent = ArchitectureAgent(reasoning=MockReasoningProvider(force_error="malformed"))
     request = _make_request({"requirements": _SAMPLE_REQUIREMENTS})
@@ -134,6 +170,34 @@ def test_architecture_output_data_rejects_empty_required_list():
         "component_changes": ["Add cache layer."],
         "decisions": ["Use Redis for caching."],
         "rationale": "Improves latency.",
+        "risks": [],
+    }
+    with pytest.raises(ValidationError):
+        ArchitectureOutputData(**payload)
+
+
+def test_architecture_output_data_allows_empty_fields_when_needs_clarification():
+    validated = ArchitectureOutputData(
+        needs_clarification=True,
+        clarification_question="Expected request volume?",
+        tech_stack=[],
+        component_changes=[],
+        decisions=[],
+        rationale="",
+        risks=[],
+    )
+    assert validated.needs_clarification is True
+    assert validated.clarification_question == "Expected request volume?"
+
+
+def test_architecture_output_data_requires_clarification_question_when_needs_clarification():
+    payload = {
+        "needs_clarification": True,
+        "clarification_question": "",  # blank -- must be rejected, not silently accepted
+        "tech_stack": [],
+        "component_changes": [],
+        "decisions": [],
+        "rationale": "",
         "risks": [],
     }
     with pytest.raises(ValidationError):
