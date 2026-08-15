@@ -21,6 +21,7 @@ from ai_sdlc.cli.client import PlatformClient
 from ai_sdlc.cli.config import CLIConfig
 from ai_sdlc.cli.tui import NovaApp
 from ai_sdlc.platform.server import run_platform_server
+from tests.conftest import init_git_repo
 
 _REQUIREMENT_TEXT = (
     "Add support for Redis caching to our order service to reduce DB load "
@@ -42,7 +43,11 @@ def _start_server(workspace: Path):
 @pytest.fixture
 def real_agents_server(tmp_path: Path):
     workspace = tmp_path / "repo"
-    workspace.mkdir()
+    # A real git repository, not just a directory: the Development node
+    # always creates a real isolated git worktree
+    # (ai_sdlc.agents.developer.worktree), regardless of which
+    # CodingCapability provider is configured.
+    init_git_repo(workspace)
     bootstrap.write_agent_metadata(workspace)
     server, thread = _start_server(workspace)
     try:
@@ -84,6 +89,16 @@ def test_tui_happy_path_completes_workflow(real_agents_server) -> None:
 
     async def _run() -> None:
         async with app.run_test(size=(100, 40)) as pilot:
+            # Real po/architecture/ux complete without interrupting on this
+            # requirement text; Development always requests approval once
+            # it succeeds (see DeveloperAgent's module docstring), so the
+            # TUI's own input-box loop needs "y" + Enter to approve it
+            # before the workflow can reach a halt status.
+            await _wait_until(lambda: app._awaiting is not None and app._awaiting[0] == "approval_decision", pilot)
+            await pilot.click("#input")
+            await pilot.press("y")
+            await pilot.press("enter")
+
             await _wait_until(lambda: app._reached_halt, pilot)
 
             assert app.workflow_id is not None
@@ -116,6 +131,13 @@ def test_tui_prompts_for_requirement_and_resolves_clarification(real_agents_serv
 
             for ch in "This covers new customers signing up through the web app only.":
                 await pilot.press(ch)
+            await pilot.press("enter")
+
+            # Real architecture/ux complete without interrupting; Development
+            # always requests approval once it succeeds -- see the happy-path
+            # test above for why "y" + Enter is needed here now.
+            await _wait_until(lambda: app._awaiting is not None and app._awaiting[0] == "approval_decision", pilot)
+            await pilot.press("y")
             await pilot.press("enter")
 
             await _wait_until(lambda: app._reached_halt, pilot)
@@ -157,6 +179,14 @@ def test_tui_quit_mid_clarification_leaves_workflow_paused_and_resumable(real_ag
         workflow_id, config.initiator_id, status.pending_action.interaction_id, "Web signup flow only."
     )
     assert "resuming" in data.message.lower() or "accepted" in data.message.lower()
+
+    # Real architecture/ux complete without interrupting; Development always
+    # requests approval once it succeeds -- see the happy-path test above
+    # for why an explicit approval is needed before reaching COMPLETED now.
+    mid_status = client.get_status(workflow_id)
+    assert mid_status.pending_action is not None
+    assert mid_status.pending_action.action_type == "APPROVAL"
+    client.submit_approval(workflow_id, config.initiator_id, mid_status.pending_action.interaction_id, True, None)
 
     final_status = client.get_status(workflow_id)
     assert final_status.status == "COMPLETED"

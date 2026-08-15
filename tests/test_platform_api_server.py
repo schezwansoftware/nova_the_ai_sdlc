@@ -7,11 +7,16 @@ from pathlib import Path
 
 from ai_sdlc.orchestration.state import StateStore, WorkflowState
 from ai_sdlc.platform.server import run_platform_server
+from tests.conftest import init_git_repo
 
 
 def prepare_workspace_with_po(tmp_path: Path) -> Path:
     workspace = tmp_path / "repo"
-    workspace.mkdir()
+    # A real git repository, not just a directory: the Development node
+    # always creates a real isolated git worktree
+    # (ai_sdlc.agents.developer.worktree), regardless of which
+    # CodingCapability provider is configured.
+    init_git_repo(workspace)
     agents_dir = workspace / ".ai-sdlc" / "agents"
     agents_dir.mkdir(parents=True)
     metadata = {
@@ -50,6 +55,16 @@ def prepare_workspace_with_po(tmp_path: Path) -> Path:
         "state_artifact": "ux.json",
     }
     (agents_dir / "ux.json").write_text(json.dumps(ux_metadata), encoding="utf-8")
+    developer_metadata = {
+        "agent_id": "developer",
+        "version": "1.0",
+        "impl": "ai_sdlc.agents.developer.developer_agent.DeveloperAgent",
+        "input_schema": "developer-input-v1",
+        "output_schema": "developer-output-v1",
+        "capabilities": ["coding"],
+        "state_artifact": "implementation.json",
+    }
+    (agents_dir / "developer.json").write_text(json.dumps(developer_metadata), encoding="utf-8")
     return workspace
 
 
@@ -237,7 +252,11 @@ def test_platform_http_api_start_and_get_status(tmp_path: Path):
         assert status == 200
         assert body["success"] is True
         assert body["data"]["workflow_id"] == workflow_id
-        assert body["data"]["status"] in ("RUNNING", "COMPLETED")
+        # Development always interrupts for approval once it succeeds
+        # rather than auto-completing (see DeveloperAgent's module
+        # docstring), so a full run's natural terminus now includes
+        # WAITING_FOR_APPROVAL alongside RUNNING/COMPLETED.
+        assert body["data"]["status"] in ("RUNNING", "WAITING_FOR_APPROVAL", "COMPLETED")
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -299,18 +318,17 @@ def test_platform_http_api_submit_clarification_and_resume(tmp_path: Path):
 def test_platform_http_api_submit_approval_and_resume(tmp_path: Path):
     workspace = prepare_workspace_with_po(tmp_path)
     store = StateStore(workspace)
+    # Parked on "development" -- the last DEFAULT_WORKFLOW_NODES node -- so
+    # approval-resume (which advances past the approved node instead of
+    # re-invoking its agent, see LangGraphRunner.resume_after_approval)
+    # completes the workflow directly with no further agent invocation.
     wf = WorkflowState(
         workflow_id="wf-approve",
-        current_stage="requirements",
+        current_stage="development",
         initiator_id="u3",
         status="waiting_for_approval",
-        # In the real flow this would already be populated by start_workflow
-        # (see OrchestratorAPI.start_workflow persisting raw_requirement onto
-        # wf.inputs); the resume-after-approval path re-invokes the PO Agent
-        # from wf.inputs with no fresh caller-supplied text, so it must
-        # already be present here for the real POAgent to complete on resume.
         inputs={"requirement_text": "Add export functionality for customers."},
-        pending_approval={"approval_id": "approval-approve", "stage": "requirements", "artifact": {}, "inputs": {}},
+        pending_approval={"approval_id": "approval-approve", "stage": "development", "artifact": {}, "inputs": {}},
     )
     store.write_workflow(wf)
 
@@ -325,7 +343,7 @@ def test_platform_http_api_submit_approval_and_resume(tmp_path: Path):
         assert status == 200
         assert body["success"] is True
         assert body["data"]["workflow_id"] == "wf-approve"
-        assert body["data"]["status"] in ("RUNNING", "COMPLETED")
+        assert body["data"]["status"] == "COMPLETED"
     finally:
         server.shutdown()
         thread.join(timeout=5)

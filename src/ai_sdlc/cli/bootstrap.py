@@ -57,6 +57,15 @@ AGENT_METADATA: List[dict] = [
         "capabilities": ["reasoning", "design"],
         "state_artifact": "ux.json",
     },
+    {
+        "agent_id": "developer",
+        "version": "1.0",
+        "impl": "ai_sdlc.agents.developer.developer_agent.DeveloperAgent",
+        "input_schema": "developer-input-v1",
+        "output_schema": "developer-output-v1",
+        "capabilities": ["coding"],
+        "state_artifact": "implementation.json",
+    },
 ]
 
 

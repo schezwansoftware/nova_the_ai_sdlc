@@ -362,24 +362,24 @@ runtime dependency; `pyproject.toml` is unchanged.
 Non-blocking loose ends from the Claude Forge / Copilot Forge `CodingCapability`
 work. Worth picking up once the Developer Agent itself gets scoped, not before.
 
-- [ ] **No `revision_feedback`-equivalent field on `CodingRequest`.** The
-      canonical interface (`src/ai_sdlc/capabilities/coding.py`, PR #14) has
-      no mechanism for threading rejection feedback into a retry call, unlike
-      the UX Agent's `revision_feedback` input-threading pattern (§6, "UX
-      Revision & Feedback Loop"). Surfaced during PR #15's reconciliation
-      pass; deliberately left undecided rather than inventing a field
-      unilaterally. Likely answer: the (not-yet-built) Developer Agent folds
-      rejection feedback into `task_summary`/`acceptance_criteria` before
-      re-calling `execute()` — but that's an assumption, not something either
-      `coding.py` or `claude_sdk.py` states. Resolve when the Developer Agent
-      is actually scoped.
+- [x] ~~**No `revision_feedback`-equivalent field on `CodingRequest`.**~~
+      **Resolved** (branch `agents/forge-developer-agent`): confirmed the
+      likely answer above was right — `coding.py`'s canonical interface
+      stays as-is (no new field), and `DeveloperAgent._build_coding_request`
+      (`src/ai_sdlc/agents/developer/developer_agent.py`) folds
+      `wf.inputs["revision_feedback"]` into `task_summary` before calling
+      `execute()`. That input key itself needed a small Orion-side fix
+      first — see "Forge — Developer Agent" below.
 - [ ] **What triggers push + PR-open after human approval is unresolved.**
       Both providers stop at "committed locally, not pushed" by design (§4
       gates this on approval) — but nothing in §3/§4 says what the actual
       trigger mechanism is: a second `CodingCapability` call, a separate
       capability method, or something Nexus-owned. Flagged explicitly by
-      Copilot Forge rather than guessed. Needs a real design pass alongside
-      the Developer Agent.
+      Copilot Forge rather than guessed. **Still open** even now that the
+      Developer Agent exists (branch `agents/forge-developer-agent`,
+      deliberately scoped to "stop at approved diff" — see that section
+      below): the approved worktree/branch is left on disk specifically for
+      whoever picks this up next.
 - [ ] **Neither real provider has been verified against a live, authenticated
       session** — both are implementation-against-real-installed-types (or,
       for Claude, docs-only) with no working credentials available in the
@@ -397,6 +397,85 @@ work. Worth picking up once the Developer Agent itself gets scoped, not before.
       needs a real look before the Copilot provider is anything more than
       optional.
 
+## Forge — Developer Agent (this pass, branch `agents/forge-developer-agent`)
+
+The Developer Agent itself, previously the acknowledged frontier ("the
+next real gap is the Developer Agent" — see prior sessions' notes),
+now exists: `src/ai_sdlc/agents/developer/developer_agent.py`, wired as
+the graph's fourth node (`development`, after `ux_design`) in
+`DEFAULT_WORKFLOW_NODES`, registered in both
+`AGENT_METADATA`/`write_agent_metadata` (`cli/bootstrap.py`, so real
+`ai-sdlc init` actually scaffolds it, not just tests) and every test
+fixture that drives a full workflow. Deliberately scoped to **"stop at
+approved diff"**: it creates an isolated git worktree, calls
+`CodingCapability`, and requests human approval for the diff through the
+existing generic approval gate — it does not push the branch or open a
+PR (see the still-open item above).
+
+- [x] **Isolated worktree lifecycle**
+      (`src/ai_sdlc/agents/developer/worktree.py`, new module) — nothing
+      previously created the isolation `CodingCapability`'s real providers
+      assume already exists; both `claude_sdk.py`/`coding_copilot.py` only
+      ever *verify* `working_tree_path`, never create it. Worktrees live at
+      `<workspace>.ai-sdlc-worktrees/<node_id>/<workflow_id>`, a sibling of
+      the target repo rather than nested inside it (nothing adds
+      `.ai-sdlc/` to the target repo's own `.gitignore` yet, so nesting
+      there would make the live checkout's `git status` noisy). Re-entry
+      always resets to `base_branch` rather than trying to detect and
+      preserve prior state — see that module's docstring for why every
+      remaining re-entry case (a retryable provider failure, or a rejected
+      approval retried with feedback) means "redo," never "reuse."
+      `sweep_orphaned_worktrees` exists as a crash-recovery safety net but
+      is **not wired into any automatic trigger yet** (no periodic sweep,
+      no CLI-startup call) — a real follow-up, not done here.
+- [x] **A real, previously-undiscovered Orion bug, found and fixed before
+      building on top of it**: approval-resume used to *re-invoke* the
+      requesting agent from scratch (`LangGraphRunner.run()` re-matching
+      `wf.current_stage`), correct for cheap reasoning-only agents but
+      unsafe for a Tier 3 agent — re-running `CodingCapability.execute()`
+      after approval could silently produce a *different* diff than the
+      one a human actually approved. Fixed in `orchestration/orchestrator.py`
+      / `orchestration/langgraph_runner.py`
+      (`LangGraphRunner.resume_after_approval`, new): the approved
+      `AgentResult.data` is now persisted onto `wf.pending_approval` and
+      merged onto `wf.inputs` on approval, advancing past the node instead
+      of re-invoking it — mirroring the clarification-resume path's
+      existing (correct) pattern. Required updating one existing test's
+      asserted behavior (`test_langgraph_integration.py::
+      test_approval_acceptance_resumes_exactly_once_without_recursion`,
+      which previously asserted re-invocation as correct) and fixing a
+      second, independent stub-generator helper in `test_cli_contract.py`
+      (`_write_interrupt_once_stub_agent`) that had the same missing-`data`
+      gap and only surfaced once a real multi-approval CLI flow existed to
+      exercise it.
+- [x] **`wf.inputs["target_repository"]["workspace_path"]` now actually
+      gets populated** (`OrchestratorAPI.start_workflow`,
+      `orchestration/api.py`) — previously dead-but-harmless input key that
+      only `ArchitectureAgent._gather_codebase_context()` read (see Sage's
+      follow-up entry below); nothing ever set it. Closes that gap for both
+      call sites at once, not just the Developer Agent's.
+- [ ] **UX handoff gating is deliberately incomplete.** §6's rule ("the
+      Developer Agent stage cannot begin unless `design_package_status ==
+      APPROVED`") isn't enforced — only "`ux_design` is present" is
+      checked. Enforcing the stricter rule today would make the Developer
+      Agent permanently unreachable, since the UX artifact
+      persistence/approval-gating this depends on (directly above, "Orion /
+      Core — UX_DESIGN wiring follow-up") still doesn't exist. Tighten once
+      that lands.
+- [ ] **Standards Context Layer (§9.1) still has zero implementation
+      anywhere in this codebase.** `DeveloperAgent` passes
+      `standards_instructions=""`/`standards_skills=[]` unconditionally, and
+      the V1 allow-list/self-check defaults it falls back to
+      (`git`/`mvn`/`gradle`/`npm`/`pytest`; skip self-check when no
+      build/test commands are given) are hardcoded module constants, not
+      read from any per-workspace/per-tech-stack config. Both are meant to
+      be superseded by a real Standards Layer once one exists, per §9.1 and
+      Open Question 7's own documented answer in `coding.py`.
+- [ ] **Push/PR-open follow-up pass** (see the still-open item above) needs
+      to also delete the approved worktree once it successfully pushes —
+      that responsibility was deliberately left to it rather than built
+      speculatively here.
+
 ## Sage — follow-up (RetrievalCapability's *codebase-grounding* portion now built differently — see below)
 
 - [x] ~~`RetrievalCapability` is entirely deferred — no stub exists yet in
@@ -413,16 +492,16 @@ work. Worth picking up once the Developer Agent itself gets scoped, not before.
       unaffected by the above — a harnessed coding-agent tool has no native
       Jira/Confluence awareness, so this gap isn't closed by PR #18 at all.
       Still Sage's (or Nexus-MCP-adapter) job, still not started.
-- [ ] **Architecture Agent's retrieval call is wired but not reachable in a
-      live workflow yet** (this pass, `agents/craft-architecture-retrieval-wiring`).
-      `ArchitectureAgent._gather_codebase_context()` only calls `RetrievalCapability`
-      when `request.inputs["target_repository"]["workspace_path"]` is present —
-      nothing in Orion's orchestrator currently populates that key when invoking
-      the architecture stage (`invoke_agent_for_stage`/`_make_request` in
-      `orchestration/orchestrator.py` build `inputs` from whatever the caller
-      passes; no caller sets this today). Threading a real workspace path
-      through is Orion's job, not Craft's — until then this is fully
-      backward-compatible dead code (never triggered), not a live feature.
+- [x] ~~**Architecture Agent's retrieval call is wired but not reachable in a
+      live workflow yet**~~ **Resolved** (branch `agents/forge-developer-agent`,
+      found as a side effect of wiring the Developer Agent, which needed the
+      same input key): `OrchestratorAPI.start_workflow` (`orchestration/api.py`)
+      now populates `inputs["target_repository"]["workspace_path"]` from
+      `self.orch.store.workspace` for every workflow — `ai-sdlc init` runs
+      inside the target application repository, so the workspace
+      `StateStore` is already rooted at *is* that repository. This dead
+      code is live now; not independently re-verified beyond the existing
+      test suite passing.
 
 ## Aegis — follow-up
 

@@ -2,12 +2,18 @@ from pathlib import Path
 import json
 from ai_sdlc.orchestration.orchestrator import Orchestrator
 from ai_sdlc.orchestration.state import WorkflowState
+from tests.conftest import init_git_repo
 
 
 # Helper to prepare workspace and registry metadata
 def prepare_workspace(tmp_path):
     workspace = tmp_path / "repo"
-    workspace.mkdir()
+    # The real workflow graph's fourth node (Development) always creates a
+    # real isolated git worktree (see ai_sdlc.agents.developer.worktree),
+    # regardless of which CodingCapability provider is configured -- so
+    # `workspace` itself must be a real git repository for a full run to
+    # reach that node successfully, not just a plain directory.
+    init_git_repo(workspace)
     agents_dir = workspace / ".ai-sdlc" / "agents"
     agents_dir.mkdir(parents=True)
     metadata = {
@@ -45,12 +51,37 @@ def prepare_workspace(tmp_path):
         "state_artifact": "ux.json",
     }
     (agents_dir / "ux.json").write_text(json.dumps(ux_metadata), encoding="utf-8")
+
+    developer_metadata = {
+        "agent_id": "developer",
+        "version": "1.0",
+        "impl": "ai_sdlc.agents.developer.developer_agent.DeveloperAgent",
+        "input_schema": "developer-input-v1",
+        "output_schema": "developer-output-v1",
+        "capabilities": ["coding"],
+        "state_artifact": "implementation.json",
+    }
+    (agents_dir / "developer.json").write_text(json.dumps(developer_metadata), encoding="utf-8")
     return workspace
 
 
 def test_requirement_po_completed(tmp_path):
     workspace = prepare_workspace(tmp_path)
-    wf = WorkflowState(workflow_id="wf1", current_stage="requirements", initiator_id="u1")
+    # run_workflow_graph's own `inputs=` param (used below) is only ever
+    # threaded to the *first* node (LangGraphRunner.run: `node_inputs =
+    # self.inputs if i == start_index else None`) -- invoke_agent_for_stage's
+    # COMPLETED branch persists a node's output_key-keyed result data onto
+    # wf.inputs, but not the rest of that call's merged_inputs, so anything
+    # not threaded via an output_key (like target_repository) would vanish
+    # once "requirements" completes if passed only that way. The real flow
+    # (OrchestratorAPI.start_workflow) avoids this by setting inputs
+    # directly on the WorkflowState instead -- matched here.
+    wf = WorkflowState(
+        workflow_id="wf1",
+        current_stage="requirements",
+        initiator_id="u1",
+        inputs={"target_repository": {"workspace_path": str(workspace)}},
+    )
     orch = Orchestrator(workspace)
     orch.store.write_workflow(wf)
 
@@ -60,7 +91,13 @@ def test_requirement_po_completed(tmp_path):
         wf.workflow_id,
         inputs={"requirement_text": "Add a CSV export button to the reports page for finance users."},
     )
-    assert res["status"] == "completed"
+    # The graph now runs all the way through Architecture/UX/Development --
+    # Development always interrupts for human approval once it succeeds
+    # (it never auto-completes; see DeveloperAgent's module docstring),
+    # so a full run's natural terminus is an approval interrupt on
+    # "development", not "completed".
+    assert res["status"] == "interrupted"
+    assert res["type"] == "approval"
 
 
 def test_requirement_po_clarify_and_resume(tmp_path):
@@ -73,7 +110,13 @@ def test_requirement_po_clarify_and_resume(tmp_path):
     # exercise the needs_clarification path via invoke_agent_for_stage.
     wf_loaded = orch.load_workflow()
     res = orch.invoke_agent_for_stage(
-        wf_loaded, "po", inputs={"requirement_text": "Add export feature", "force": "clarify"}
+        wf_loaded,
+        "po",
+        inputs={
+            "requirement_text": "Add export feature",
+            "force": "clarify",
+            "target_repository": {"workspace_path": str(workspace)},
+        },
     )
     assert res["status"] == "needs_clarification"
     qid = res["question_id"]
@@ -89,9 +132,13 @@ def test_requirement_po_clarify_and_resume(tmp_path):
     wf_paused.inputs.pop("force", None)
     orch.save_workflow(wf_paused)
 
-    # resume after providing answer
+    # resume after providing answer. The graph then runs Architecture/UX/
+    # Development -- Development always interrupts for approval once it
+    # succeeds rather than auto-completing (see DeveloperAgent's module
+    # docstring), so that's the real terminus of a full run now.
     resume_res = orch.resume_workflow_after_clarification(wf_loaded.workflow_id, qid, "Only selected fields")
-    assert resume_res["status"] == "completed"
+    assert resume_res["status"] == "interrupted"
+    assert resume_res["type"] == "approval"
 
 
 def test_requirement_po_approval_and_resume(tmp_path):
@@ -103,31 +150,30 @@ def test_requirement_po_approval_and_resume(tmp_path):
     # Use the PO Agent's documented `force` test hook to deterministically
     # exercise the needs_approval path via invoke_agent_for_stage. The real
     # POAgent has no approval-gating logic of its own; Orion owns approval
-    # workflow progression.
-    #
-    # Persist requirement_text onto wf.inputs itself (mirroring what
-    # OrchestratorAPI.start_workflow does in the real flow) so it survives
-    # into the resume-after-approval call below: LangGraphRunner.run(),
-    # invoked by resume_workflow_after_approval, re-invokes the same stage
-    # with no fresh caller-supplied inputs, relying entirely on wf.inputs.
+    # workflow progression. The hook now runs POAgent's real flow first and
+    # only overrides a COMPLETED result's status (see po_agent.py), since
+    # approval-resume no longer re-invokes the requesting agent (see below)
+    # -- so the real requirements data produced here is what must carry
+    # forward to Architecture/UX after approval, not anything regenerated
+    # by a second PO call.
     wf_loaded = orch.load_workflow()
-    wf_loaded.inputs = {"requirement_text": "Add export feature"}
+    wf_loaded.inputs = {
+        "requirement_text": "Add export feature for finance users.",
+        "target_repository": {"workspace_path": str(workspace)},
+    }
     orch.save_workflow(wf_loaded)
     res = orch.invoke_agent_for_stage(wf_loaded, "po", inputs={"force": "approval"})
     assert res["status"] == "needs_approval"
     aid = res["approval_id"]
 
-    # Same reasoning as the clarification test above: clear the test-only
-    # `force` hook (now persisted onto wf.inputs by invoke_agent_for_stage)
-    # before resuming, or POAgent.execute() would request approval again
-    # instead of proceeding.
-    wf_paused = orch.load_workflow(wf_loaded.workflow_id)
-    wf_paused.inputs.pop("force", None)
-    orch.save_workflow(wf_paused)
-
-    # Approve and resume
+    # Approve and resume. LangGraphRunner.resume_after_approval merges the
+    # approved PO result's data onto wf.inputs["requirements"] and advances
+    # straight to "architecture" -- it does not re-invoke POAgent, so no
+    # `force` hook cleanup is needed here (contrast with the clarification
+    # test above, which does still need it).
     resume_res = orch.resume_workflow_after_approval(wf_loaded.workflow_id, aid, "approved")
-    assert resume_res["status"] == "completed"
+    assert resume_res["status"] == "interrupted"
+    assert resume_res["type"] == "approval"
 
 
 def test_approval_acceptance_resumes_exactly_once_without_recursion(tmp_path):
@@ -148,6 +194,11 @@ def test_approval_acceptance_resumes_exactly_once_without_recursion(tmp_path):
                 workflow_id=request.workflow_id,
                 agent_id="po",
                 status=AgentStatus.NEEDS_APPROVAL,
+                # Real, final data attached to the approval request itself
+                # -- the requesting agent is never re-invoked to produce
+                # this "later" (see LangGraphRunner.resume_after_approval),
+                # so it must be complete before approval is even requested.
+                data={"feature_name": "test feature", "user_stories": []},
                 artifact=ArtifactRef(type="requirements", path=".ai-sdlc/requirements.json"),
                 decision=AgentDecision(status="ready_for_approval", approval_required=True),
             )
@@ -156,17 +207,23 @@ def test_approval_acceptance_resumes_exactly_once_without_recursion(tmp_path):
     orch.register_agent("po", agent)
 
     wf_loaded = orch.load_workflow()
-    res = orch.invoke_agent_for_stage(wf_loaded, "po")
+    res = orch.invoke_agent_for_stage(
+        wf_loaded, "po", inputs={"target_repository": {"workspace_path": str(workspace)}}
+    )
     assert res["status"] == "needs_approval"
     aid = res["approval_id"]
     assert agent.calls == 1
 
     # Approving must resume through the normal Runner path exactly once —
-    # no RecursionError — and the agent is invoked exactly once more for the
-    # resumed attempt (it happens to request approval again here, which is a
-    # legitimate terminal outcome for this stub, not a bug).
+    # no RecursionError — and must NOT re-invoke the agent that already
+    # produced the approved result: its call count stays at 1. The approved
+    # data merges onto wf.inputs["requirements"] and the workflow advances
+    # through the real Architecture/UX/Development stages (mock reasoning/
+    # design/coding providers satisfy them deterministically), ending in a
+    # second, distinct approval interrupt on "development" -- its own
+    # NEEDS_APPROVAL, not a recursion of the first.
     resume_res = orch.resume_workflow_after_approval(wf_loaded.workflow_id, aid, "approved")
-    assert agent.calls == 2
+    assert agent.calls == 1
     assert resume_res["status"] == "interrupted"
     assert resume_res["type"] == "approval"
 
@@ -177,7 +234,12 @@ def test_retryable_failure_then_success(tmp_path):
     orch = Orchestrator(workspace)
 
     # create workflow
-    wf = WorkflowState(workflow_id="wf4", current_stage="requirements", initiator_id="u1")
+    wf = WorkflowState(
+        workflow_id="wf4",
+        current_stage="requirements",
+        initiator_id="u1",
+        inputs={"target_repository": {"workspace_path": str(workspace)}},
+    )
     orch.store.write_workflow(wf)
 
     # register a flaky agent programmatically
@@ -219,7 +281,13 @@ def test_retryable_failure_then_success(tmp_path):
     if res.get("status") == "retry":
         res = orch.run_workflow_graph(wf.workflow_id)
 
-    assert res["status"] == "completed"
+    # Development always interrupts for approval once it succeeds rather
+    # than auto-completing (see DeveloperAgent's module docstring) -- that
+    # interrupt, reached only after Flaky's retry succeeded and Architecture/
+    # UX/Development all ran, is what proves the retry-then-success path
+    # still drives the whole graph forward correctly.
+    assert res["status"] == "interrupted"
+    assert res["type"] == "approval"
 
 
 def test_retry_exhaustion_leads_to_failure(tmp_path):

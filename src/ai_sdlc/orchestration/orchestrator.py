@@ -120,17 +120,35 @@ class Orchestrator:
             self.store.write_approval(approval_id, approval_record)
 
             if decision == "approved":
-                # clear pending and resume
+                # The node's AgentResult.data (persisted onto pending_approval
+                # by invoke_agent_for_stage below) travels forward through the
+                # resume instead of being regenerated -- see
+                # LangGraphRunner.resume_after_approval's docstring for why
+                # re-invoking the agent here would be wrong for a Tier 3
+                # agent whose approved output came from real, already-
+                # completed (and potentially expensive/non-deterministic)
+                # work.
+                approval_data = wf.pending_approval.get("data")
                 wf.pending_approval = None
                 wf.status = WorkflowStatus.RUNNING
                 self.save_workflow(wf)
                 from ai_sdlc.orchestration.langgraph_runner import DEFAULT_WORKFLOW_NODES, LangGraphRunner
                 nodes = list(DEFAULT_WORKFLOW_NODES)
                 runner = LangGraphRunner(self, wf, nodes=nodes)
-                return runner.run()
+                return runner.resume_after_approval(approval_data)
             else:
-                # rejected — set explicit revision state and do not continue
+                # rejected — set explicit revision state and do not continue.
+                # Thread the reviewer's feedback onto wf.inputs (matching the
+                # "revision_feedback" input-threading pattern documented in
+                # docs/architecture/v1_architecture.md section 6's "UX
+                # Revision & Feedback Loop", the same accumulated-wf.inputs
+                # mechanism invoke_agent_for_stage already uses for
+                # clarification answers) so that whenever this stage is next
+                # invoked -- via a fresh run_workflow_graph call, since no
+                # automatic revision-resume trigger exists yet -- the agent
+                # receives it as request.inputs["revision_feedback"].
                 wf.pending_approval = {**wf.pending_approval, "decision": "rejected", "feedback": feedback}
+                wf.inputs = {**wf.inputs, "revision_feedback": feedback}
                 wf.status = WorkflowStatus.REVISION_REQUIRED
                 self.save_workflow(wf)
                 self._emit({"event": "approval_rejected", "workflow_id": wf.workflow_id, "approval_id": approval_id, "feedback": feedback})
@@ -353,6 +371,13 @@ class Orchestrator:
                     "stage": wf.current_stage,
                     "artifact": approval.get("artifact"),
                     "inputs": merged_inputs.copy(),
+                    # Carried across the approval boundary so
+                    # resume_workflow_after_approval can hand it to
+                    # LangGraphRunner.resume_after_approval instead of
+                    # re-invoking this agent to regenerate it (see that
+                    # method's docstring).
+                    "data": result.data,
+                    "output_key": output_key,
                 }
                 self.save_workflow(wf)
                 self._emit({"event": "approval_requested", "workflow_id": wf.workflow_id, "approval_id": aid, "stage": wf.current_stage})
