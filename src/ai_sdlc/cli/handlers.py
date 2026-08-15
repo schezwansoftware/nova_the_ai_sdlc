@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional, TypeVar
 
 import questionary
 import typer
@@ -231,14 +233,43 @@ def run_init(
 _MIN_REQUIREMENT_LENGTH = 10
 
 
-def run_start(console: Console, prompt: Optional[str], project_context: Optional[Dict[str, Any]] = None) -> None:
+def run_start(
+    console: Console,
+    prompt: Optional[str],
+    project_context: Optional[Dict[str, Any]] = None,
+    no_tui: bool = False,
+) -> None:
     config = _require_config(console)
+    interactive = _is_interactive_session()
+
+    if prompt is None and not interactive:
+        formatters.render_error(console, "No --prompt given and this session isn't interactive.")
+        console.print('Pass one explicitly: ai-sdlc start --prompt "<requirement>"')
+        raise typer.Exit(code=1)
+
+    client = _client_for(config)
+
+    # Interactive sessions default to the full-screen TUI (cli/tui.py) --
+    # it resolves the requirement (if `prompt` wasn't given via --prompt)
+    # and drives the whole clarification/approval loop itself through its
+    # own input box, calling the exact same PlatformClient methods
+    # `_drive_workflow_interactively` below does. `--no-tui` falls back to
+    # today's line-mode loop, e.g. for terminals that don't support the
+    # alt-screen buffer.
+    if interactive and not no_tui:
+        from ai_sdlc.cli.tui import NovaApp
+
+        app = NovaApp(config=config, client=client, initial_prompt=prompt)
+        app.run()
+        if app.left_workflow_paused:
+            formatters.render_warning(console, "Interrupted -- the workflow is left paused at its current stage.")
+            console.print(
+                "Resume later with [bold]ai-sdlc answer[/bold]/[bold]ai-sdlc approve[/bold]/"
+                "[bold]ai-sdlc reject[/bold], or check with [bold]ai-sdlc status[/bold]."
+            )
+        return
 
     if prompt is None:
-        if not _is_interactive_session():
-            formatters.render_error(console, "No --prompt given and this session isn't interactive.")
-            console.print('Pass one explicitly: ai-sdlc start --prompt "<requirement>"')
-            raise typer.Exit(code=1)
         try:
             prompt = _resolve_requirement_interactively(console)
         except (KeyboardInterrupt, EOFError):
@@ -246,10 +277,10 @@ def run_start(console: Console, prompt: Optional[str], project_context: Optional
             formatters.render_warning(console, "Cancelled -- no workflow was started.")
             raise typer.Exit(code=130)
 
-    client = _client_for(config)
-    _print_thinking_hint(console, config)
     try:
-        data = client.start_workflow(config.initiator_id, prompt, project_context or {})
+        data = _call_with_thinking(
+            console, config, lambda: client.start_workflow(config.initiator_id, prompt, project_context or {})
+        )
     except ConnectionUnavailable as exc:
         _fail_connection(console, config, exc)
         return
@@ -263,24 +294,46 @@ def run_start(console: Console, prompt: Optional[str], project_context: Optional
     _drive_workflow_interactively(console, client, config, data.workflow_id)
 
 
-def _print_thinking_hint(console: Console, config: CLIConfig) -> None:
-    """Print a one-line "this may take a while" note before a call that
-    can trigger real agent execution (`start_workflow`/
-    `submit_clarification`/`submit_approval` -- any call that can advance
-    the workflow). Only when `agent_framework` is actually configured:
-    the mock providers every test/CI run uses are effectively
-    instantaneous, so this would be pure noise there. See `client.py`'s
-    `DEFAULT_REQUEST_TIMEOUT_SECONDS` docstring for why the call this
-    precedes can now legitimately take a while instead of failing fast --
-    this message is what keeps that wait from *feeling* like a frozen
-    terminal, which a longer timeout alone doesn't fix.
+_T = TypeVar("_T")
+
+
+def _call_with_thinking(console: Console, config: CLIConfig, fn: Callable[[], _T]) -> _T:
+    """Run a blocking `PlatformClient` call that can trigger real agent
+    execution (`start_workflow`/`submit_clarification`/`submit_approval` --
+    any call that can advance the workflow) on a background thread, while
+    animating an elapsed-time status line on the main thread. Only when
+    `agent_framework` is actually configured: the mock providers every
+    test/CI run uses are effectively instantaneous, so this would be pure
+    noise there. See `client.py`'s `DEFAULT_REQUEST_TIMEOUT_SECONDS`
+    docstring for why the call this wraps can now legitimately take up to
+    ~120s instead of failing fast -- a static "this may take a while" line
+    (this function's predecessor) still leaves the terminal looking frozen
+    for that whole stretch; an animated elapsed-seconds counter doesn't.
     """
     if not config.agent_framework:
-        return
-    console.print(
-        f"[dim]Thinking (using {config.agent_framework}) -- this can take a "
-        "moment for a real model call...[/dim]"
-    )
+        return fn()
+
+    result: Dict[str, _T] = {}
+    error: Dict[str, Exception] = {}
+
+    def _target() -> None:
+        try:
+            result["value"] = fn()
+        except Exception as exc:  # re-raised on the calling thread below
+            error["exc"] = exc
+
+    thread = threading.Thread(target=_target, daemon=True)
+    start = time.monotonic()
+    with console.status(f"[dim]Thinking (using {config.agent_framework})...[/dim]") as status:
+        thread.start()
+        while thread.is_alive():
+            elapsed = time.monotonic() - start
+            status.update(f"[dim]Thinking (using {config.agent_framework}) -- {elapsed:.0f}s...[/dim]")
+            thread.join(timeout=0.25)
+
+    if "exc" in error:
+        raise error["exc"]
+    return result["value"]
 
 
 def _resolve_requirement_interactively(console: Console) -> str:
@@ -390,8 +443,9 @@ def _prompt_and_submit_clarification(
     response_text = console.input("[bold]Your answer:[/bold] ").strip()
     while not response_text:
         response_text = console.input("[bold]Your answer (required):[/bold] ").strip()
-    _print_thinking_hint(console, config)
-    data = client.submit_clarification(workflow_id, config.initiator_id, question_id, response_text)
+    data = _call_with_thinking(
+        console, config, lambda: client.submit_clarification(workflow_id, config.initiator_id, question_id, response_text)
+    )
     formatters.render_success(console, data.message)
 
 
@@ -409,8 +463,9 @@ def _prompt_and_submit_approval(
         while not feedback:
             feedback = console.input("[bold]Reason for rejection (required):[/bold] ").strip()
 
-    _print_thinking_hint(console, config)
-    data = client.submit_approval(workflow_id, config.initiator_id, approval_id, approved, feedback)
+    data = _call_with_thinking(
+        console, config, lambda: client.submit_approval(workflow_id, config.initiator_id, approval_id, approved, feedback)
+    )
     formatters.render_success(console, data.message)
 
 
@@ -450,7 +505,11 @@ def run_answer(console: Console, response_text: str, workflow_id_override: Optio
         raise typer.Exit(code=1)
 
     try:
-        data = client.submit_clarification(workflow_id, config.initiator_id, pending.interaction_id, response_text)
+        data = _call_with_thinking(
+            console,
+            config,
+            lambda: client.submit_clarification(workflow_id, config.initiator_id, pending.interaction_id, response_text),
+        )
     except ConnectionUnavailable as exc:
         _fail_connection(console, config, exc)
         return
@@ -485,7 +544,11 @@ def _submit_approval_decision(
         raise typer.Exit(code=1)
 
     try:
-        data = client.submit_approval(workflow_id, config.initiator_id, pending.interaction_id, approved, feedback)
+        data = _call_with_thinking(
+            console,
+            config,
+            lambda: client.submit_approval(workflow_id, config.initiator_id, pending.interaction_id, approved, feedback),
+        )
     except ConnectionUnavailable as exc:
         _fail_connection(console, config, exc)
         return
