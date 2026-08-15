@@ -45,6 +45,11 @@ _REQUIREMENT_TEXT = (
     "under high traffic. The system must respond within 50ms for cached hits."
 )
 
+_NO_UI_REQUIREMENT_TEXT = (
+    "Add a headless command-line script that reads a CSV export and prints "
+    "a summary report to stdout, run only as a backend batch job."
+)
+
 
 def _make_api(tmp_path: Path) -> OrchestratorAPI:
     workspace = tmp_path / "repo"
@@ -121,6 +126,37 @@ def test_start_workflow_runs_po_architecture_ux_to_completion(tmp_path):
     assert isinstance(wf.inputs.get("architecture"), dict)
     assert isinstance(wf.inputs.get("ux_design"), dict)
     assert "Redis" in wf.inputs["architecture"]["tech_stack"]
+
+
+def test_no_ui_requirement_skips_ux_design_stage(tmp_path):
+    """Architecture classifies a headless/backend-only requirement as
+    `requires_ui: false`; the graph must skip the `ux_design` node entirely
+    rather than forcing the UX Agent to invent screens/flows for a feature
+    that has no UI. Drives the real public API end-to-end, same perspective
+    as the happy-path test above -- no agent or graph internals touched."""
+    api = _make_api(tmp_path)
+    api.orch.register_agent("po", POAgent())
+    api.orch.register_agent("architecture", ArchitectureAgent())
+    api.orch.register_agent("ux", UXAgent())
+
+    resp = api.start_workflow(
+        StartWorkflowRequest(initiator_id="u5", raw_requirement=_NO_UI_REQUIREMENT_TEXT, project_context={})
+    )
+    assert resp.success, resp.error
+    workflow_id = resp.data.workflow_id
+    assert resp.data.status == WorkflowStatusType.COMPLETED
+    assert resp.data.current_phase == WorkflowPhase.COMPLETED
+
+    status_resp = api.get_workflow_status(GetWorkflowStatusRequest(workflow_id=workflow_id))
+    assert status_resp.success
+    assert status_resp.data.artifacts.get("requirements") == "completed"
+    assert status_resp.data.artifacts.get("architecture") == "completed"
+    assert status_resp.data.artifacts.get("ux_design") == "skipped"
+
+    wf = api.orch.load_workflow(workflow_id)
+    assert wf.inputs["architecture"]["requires_ui"] is False
+    # UX Agent never ran: its output_key never got merged into wf.inputs.
+    assert "ux_design" not in wf.inputs
 
 
 def test_clarification_mid_sequence_resumes_into_next_node(tmp_path):

@@ -76,6 +76,16 @@ class LangGraphRunner:
             # persist current stage
             self.orch.save_workflow(self.wf)
 
+            if nid == "ux_design" and self._architecture_says_no_ui():
+                # Architecture explicitly classified this requirement as
+                # having no UI surface (requires_ui: false) -- running the
+                # UX Agent anyway would force it to invent screens/flows
+                # for a feature that has none (e.g. a headless CLI/backend
+                # change). Skip the node entirely rather than invoking it.
+                self.wf.stages[nid] = "skipped"
+                self.orch.save_workflow(self.wf)
+                continue
+
             if ntype == "agent":
                 agent_id = node.get("agent_id")
                 node_inputs = self.inputs if i == start_index else None
@@ -114,6 +124,19 @@ class LangGraphRunner:
         self.orch.save_workflow(self.wf)
         self.orch._emit({"event": "workflow_completed", "workflow_id": self.wf.workflow_id})
         return {"status": "completed"}
+
+    def _architecture_says_no_ui(self) -> bool:
+        """True once the Architecture stage has completed and explicitly
+        classified this requirement as not needing a UI
+        (`architecture.requires_ui is False`). Missing/absent/non-dict
+        architecture data means "don't skip" -- the only behavior possible
+        before this field existed, and the safe choice if architecture
+        hasn't run yet (e.g. this check firing for a node that isn't
+        actually `ux_design`, or a graph where nodes were reordered)."""
+        architecture = self.wf.inputs.get("architecture")
+        if not isinstance(architecture, dict):
+            return False
+        return architecture.get("requires_ui") is False
 
     def resume_after_clarification(self, answer: str, question_id: str) -> Dict[str, Any]:
         # Provide the answer as input to the current agent and continue execution.

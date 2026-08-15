@@ -92,8 +92,11 @@ def render_pipeline(console: Console, status: WorkflowStatusData) -> None:
     for phase in phases:
         artifact_key = _ARTIFACT_KEY_BY_PHASE.get(phase)
         completed = artifact_key is not None and status.artifacts.get(artifact_key) == "completed"
+        skipped = artifact_key is not None and status.artifacts.get(artifact_key) == "skipped"
         if completed:
             marker, style = "done", "green"
+        elif skipped:
+            marker, style = "skipped (no UI)", "dim"
         elif phase == status.current_phase and is_terminal:
             marker, style = ("done" if status.status == "COMPLETED" else status.status.lower()), (
                 "green" if status.status == "COMPLETED" else "red"

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import List
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 def _require_nonempty_strings(value: List[str], field_name: str) -> List[str]:
@@ -27,6 +27,19 @@ class ArchitectureOutputData(BaseModel):
     decisions: List[str]
     rationale: str
     risks: List[str]
+    requires_ui: bool = Field(
+        default=True,
+        description=(
+            "Whether this feature needs a user-facing UI/UX design -- a web "
+            "page, GUI screen, form, dashboard, or any visual interface an "
+            "end user interacts with. False for backend-only, headless, "
+            "console/CLI-output-only, script, or library changes that have "
+            "no interface for a user to look at or interact with (e.g. a "
+            "program that only prints to stdout). Defaults to true "
+            "(assume a UX design pass is needed) when it cannot be "
+            "determined from the requirements."
+        ),
+    )
 
     @field_validator("rationale")
     @classmethod

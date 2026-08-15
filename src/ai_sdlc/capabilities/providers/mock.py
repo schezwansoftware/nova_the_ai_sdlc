@@ -74,6 +74,17 @@ _TECH_TOKENS = (
 
 _DEFAULT_TECH_STACK = ["Python", "FastAPI", "PostgreSQL"]
 
+_NO_UI_KEYWORDS = (
+    "console", "cli", "command line", "command-line", "stdout", "print",
+    "backend", "headless", "library", "background job", "cron job",
+    "api only", "api-only", "batch job", "script",
+)
+_UI_KEYWORDS = (
+    " ui", "gui", "screen", " page", "button", "form", "dashboard", " view",
+    "display", "interface", "web", "frontend", "front-end", "click",
+    "browser", "mobile app",
+)
+
 
 def _extract_content(prompt: str) -> str:
     """Isolate the actual input content from a full agent prompt.
@@ -151,6 +162,8 @@ class MockReasoningProvider(ReasoningCapability):
             origin = get_origin(annotation)
             if origin in (list, List):
                 payload[name] = self._list_value(name, sentences)
+            elif annotation is bool:
+                payload[name] = self._bool_value(name, sentences)
             else:
                 payload[name] = self._str_value(name, sentences, prompt)
         return payload
@@ -168,6 +181,22 @@ class MockReasoningProvider(ReasoningCapability):
             drop_key = sorted(corrupted.keys())[0]
             corrupted.pop(drop_key)
         return corrupted
+
+    def _bool_value(self, name: str, sentences: List[str]) -> bool:
+        """Rule-based value for a boolean field, keyed by field name --
+        same style as `_str_value`/`_list_value`. Currently only
+        `requires_ui` (Architecture Agent) needs this; defaults to True
+        (assume a UI is needed) for any other/unknown bool field or when no
+        clear no-UI signal is found in the input, matching the schema's own
+        conservative default."""
+        lname = name.lower()
+        if "requires_ui" not in lname:
+            return True
+
+        joined = f" {' '.join(sentences).lower()} "
+        has_no_ui_signal = any(k in joined for k in _NO_UI_KEYWORDS)
+        has_ui_signal = any(k in joined for k in _UI_KEYWORDS)
+        return not (has_no_ui_signal and not has_ui_signal)
 
     def _str_value(self, name: str, sentences: List[str], prompt: str) -> str:
         lname = name.lower()

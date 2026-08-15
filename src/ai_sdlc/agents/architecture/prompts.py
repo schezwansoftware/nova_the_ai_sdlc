@@ -40,6 +40,14 @@ Produce a structured architecture with exactly these fields:
 - decisions: list of key architectural decisions made
 - rationale: a short paragraph explaining the overall reasoning behind the above
 - risks: list of architectural risks or constraints to be aware of
+- requires_ui: true if this feature needs a user-facing UI/UX design (a web
+  page, GUI screen, form, dashboard, or any visual interface a user
+  interacts with); false for backend-only, headless, console/CLI-output-only,
+  script, or library changes with no interface for a user to look at or
+  interact with (e.g. a program that only prints to stdout). Decide this
+  carefully from the requirements above -- when true, a UX design stage
+  runs next; when false, it is skipped entirely, so do not default to true
+  out of caution when the requirements clearly describe a UI-less change.
 """
 
 
