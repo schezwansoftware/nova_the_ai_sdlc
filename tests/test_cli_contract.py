@@ -28,6 +28,7 @@ from ai_sdlc.cli import bootstrap
 from ai_sdlc.cli.config import CLIConfig, load_config, save_config
 from ai_sdlc.cli.main import app
 from ai_sdlc.platform.server import run_platform_server
+from tests.conftest import init_git_repo
 
 runner = CliRunner()
 
@@ -82,7 +83,11 @@ def _write_config(
 @pytest.fixture
 def real_agents_server(tmp_path: Path):
     workspace = tmp_path / "repo"
-    workspace.mkdir()
+    # A real git repository, not just a directory: the Development node
+    # always creates a real isolated git worktree
+    # (ai_sdlc.agents.developer.worktree), regardless of which
+    # CodingCapability provider is configured.
+    init_git_repo(workspace)
     bootstrap.write_agent_metadata(workspace)
     server, thread = _start_server(workspace)
     try:
@@ -130,7 +135,7 @@ def test_init_scaffolds_config_and_agent_metadata_and_detects_missing_server(
 
     agents_dir = workspace / ".ai-sdlc" / "agents"
     written_ids = {json.loads(p.read_text(encoding="utf-8"))["agent_id"] for p in agents_dir.glob("*.json")}
-    assert written_ids == {"po", "architecture", "ux"}
+    assert written_ids == {"po", "architecture", "ux", "developer"}
     assert config["agent_framework"] == "claude"
 
 
@@ -277,7 +282,11 @@ def test_init_is_idempotent_and_detects_already_running_server(
     tmp_path: Path, cli_config_dir: Path
 ) -> None:
     workspace = tmp_path / "repo"
-    workspace.mkdir()
+    # A real git repository, not just a directory: the Development node
+    # always creates a real isolated git worktree
+    # (ai_sdlc.agents.developer.worktree), regardless of which
+    # CodingCapability provider is configured.
+    init_git_repo(workspace)
     bootstrap.write_agent_metadata(workspace)
     server, thread = _start_server(workspace)
     try:
@@ -369,11 +378,20 @@ def test_happy_path_start_reaches_completed(real_agents_server, cli_config_dir: 
     assert "REQUIREMENTS" in start_result.output
     assert "ARCHITECTURE" in start_result.output
     assert "UX_DESIGN" in start_result.output
-    assert "Workflow completed" in start_result.output
+    # Non-interactive `start` stops at the first pending action rather than
+    # blocking for input (docs §12.1) -- Development always requests
+    # approval once it succeeds rather than auto-completing (see
+    # DeveloperAgent's module docstring), so that's the real stopping
+    # point of a non-interactive run now.
+    assert "Approval requested" in start_result.output
 
     status_result = runner.invoke(app, ["status"])
     assert status_result.exit_code == 0, status_result.output
-    assert "Workflow completed" in status_result.output
+    assert "Approval requested" in status_result.output
+
+    approve_result = runner.invoke(app, ["approve"])
+    assert approve_result.exit_code == 0, approve_result.output
+    assert "Workflow completed" in approve_result.output
 
 
 def test_call_with_thinking_shows_animated_status_when_agent_framework_configured() -> None:
@@ -462,7 +480,11 @@ def test_start_no_tui_flag_skips_tui_even_when_interactive(
     _write_config(cli_config_dir, workspace, port=port)
     monkeypatch.setattr("ai_sdlc.cli.handlers._is_interactive_session", lambda: True)
 
-    result = runner.invoke(app, ["start", "--prompt", _REQUIREMENT_TEXT, "--no-tui"])
+    # Real po/architecture/ux complete without interrupting on this
+    # requirement text; Development always requests approval once it
+    # succeeds, so the interactive loop (docs §12.1) prompts for it inline
+    # -- "y" approves.
+    result = runner.invoke(app, ["start", "--prompt", _REQUIREMENT_TEXT, "--no-tui"], input="y\n")
 
     assert result.exit_code == 0, result.output
     assert "ran" not in fake_tui
@@ -481,7 +503,9 @@ def test_start_without_prompt_asks_interactively_and_rejects_too_short_text(
     _write_config(cli_config_dir, workspace, port=port)
     monkeypatch.setattr("ai_sdlc.cli.handlers._is_interactive_session", lambda: True)
 
-    result = runner.invoke(app, ["start", "--no-tui"], input=f"too short\n{_REQUIREMENT_TEXT}\n")
+    # Trailing "y\n" approves Development's own approval request -- see
+    # the --no-tui test above for why the interactive loop reaches it now.
+    result = runner.invoke(app, ["start", "--no-tui"], input=f"too short\n{_REQUIREMENT_TEXT}\ny\n")
 
     assert result.exit_code == 0, result.output
     assert "ai-sdlc" in result.output  # banner
@@ -500,7 +524,9 @@ def test_start_without_prompt_reads_requirement_from_file_path(
     requirement_file = tmp_path / "requirement.txt"
     requirement_file.write_text(_REQUIREMENT_TEXT, encoding="utf-8")
 
-    result = runner.invoke(app, ["start", "--no-tui"], input=f"{requirement_file}\n")
+    # Trailing "y\n" approves Development's own approval request -- see
+    # the --no-tui test above for why the interactive loop reaches it now.
+    result = runner.invoke(app, ["start", "--no-tui"], input=f"{requirement_file}\ny\n")
 
     assert result.exit_code == 0, result.output
     assert "Read requirement from" in result.output
@@ -533,9 +559,18 @@ def test_clarification_interrupt_answer_resumes_to_completion(clarification_stub
     assert status_result.exit_code == 0, status_result.output
     assert "Clarification requested" in status_result.output
 
+    # `answer` is a discrete, one-shot command (unlike `start`'s own
+    # interactive loop) -- it resolves this one clarification and reports
+    # whatever the workflow stops at next, which is now Development's own
+    # approval request (real ux/development both run for real after the
+    # stubbed architecture node resolves).
     answer_result = runner.invoke(app, ["answer", "Use a modular monolith with a dedicated cache layer."])
     assert answer_result.exit_code == 0, answer_result.output
-    assert "Workflow completed" in answer_result.output
+    assert "Approval requested" in answer_result.output
+
+    approve_result = runner.invoke(app, ["approve"])
+    assert approve_result.exit_code == 0, approve_result.output
+    assert "Workflow completed" in approve_result.output
 
 
 def test_interactive_start_resolves_clarification_inline(
@@ -548,10 +583,13 @@ def test_interactive_start_resolves_clarification_inline(
     _write_config(cli_config_dir, workspace, port=port)
     monkeypatch.setattr("ai_sdlc.cli.handlers._is_interactive_session", lambda: True)
 
+    # Trailing "y\n" approves Development's own approval request, reached
+    # after the stubbed architecture clarification resolves and the real
+    # ux/development nodes both run.
     result = runner.invoke(
         app,
         ["start", "--prompt", _REQUIREMENT_TEXT, "--no-tui"],
-        input="Use a modular monolith with a dedicated cache layer.\n",
+        input="Use a modular monolith with a dedicated cache layer.\ny\n",
     )
 
     assert result.exit_code == 0, result.output
@@ -567,7 +605,10 @@ def test_interactive_start_resolves_approval_approve_inline(
     _write_config(cli_config_dir, workspace, port=port)
     monkeypatch.setattr("ai_sdlc.cli.handlers._is_interactive_session", lambda: True)
 
-    result = runner.invoke(app, ["start", "--prompt", _REQUIREMENT_TEXT, "--no-tui"], input="y\n")
+    # Second "y\n" approves Development's own approval request, reached
+    # after the stubbed ux approval resolves and the real development node
+    # runs.
+    result = runner.invoke(app, ["start", "--prompt", _REQUIREMENT_TEXT, "--no-tui"], input="y\ny\n")
 
     assert result.exit_code == 0, result.output
     assert "Approval requested" in result.output
@@ -632,9 +673,16 @@ def test_interactive_start_keyboard_interrupt_leaves_workflow_paused(
     assert status_result.exit_code == 0, status_result.output
     assert "Clarification requested" in status_result.output
 
+    # `answer` is a discrete, one-shot command -- it resolves this one
+    # clarification and reports whatever the workflow stops at next, which
+    # is now Development's own approval request.
     answer_result = runner.invoke(app, ["answer", "Use a modular monolith with a dedicated cache layer."])
     assert answer_result.exit_code == 0, answer_result.output
-    assert "Workflow completed" in answer_result.output
+    assert "Approval requested" in answer_result.output
+
+    approve_result = runner.invoke(app, ["approve"])
+    assert approve_result.exit_code == 0, approve_result.output
+    assert "Workflow completed" in approve_result.output
 
 
 def test_answer_with_no_pending_clarification_errors_clearly(real_agents_server, cli_config_dir: Path) -> None:
@@ -689,6 +737,14 @@ def _write_interrupt_once_stub_agent(
             "                workflow_id=request.workflow_id,\n"
             f"                agent_id={agent_id!r},\n"
             "                status=AgentStatus.NEEDS_APPROVAL,\n"
+            # Real, final data attached to the approval request itself --
+            # approval-resume no longer re-invokes the requesting agent
+            # (LangGraphRunner.resume_after_approval), so this must
+            # already be complete when approval is requested, not
+            # produced by a call that never happens. Without this, the
+            # approved node's output_key never lands in wf.inputs, and
+            # whatever real node runs next sees it missing entirely.
+            f"                data={{'stage': {agent_id!r}, 'resolved': True}},\n"
             f"                artifact=ArtifactRef(type={agent_id!r}, path='.ai-sdlc/{agent_id}.json'),\n"
             "                decision=AgentDecision(status='ready_for_approval', approval_required=True),\n"
             "            )"
@@ -727,7 +783,11 @@ def clarification_stub_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Real po agent, but a stub `architecture` agent that requests
     clarification on its first call and completes on its second."""
     workspace = tmp_path / "repo"
-    workspace.mkdir()
+    # A real git repository, not just a directory: the Development node
+    # always creates a real isolated git worktree
+    # (ai_sdlc.agents.developer.worktree), regardless of which
+    # CodingCapability provider is configured.
+    init_git_repo(workspace)
     bootstrap.write_agent_metadata(workspace)
     _write_interrupt_once_stub_agent(
         tmp_path, workspace, "architecture", "clarification", "cli_clarification_stub_agent"
@@ -754,7 +814,11 @@ def approval_stub_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     the approve/reject paths the real (mock-provider-backed) UX agent
     doesn't naturally take."""
     workspace = tmp_path / "repo"
-    workspace.mkdir()
+    # A real git repository, not just a directory: the Development node
+    # always creates a real isolated git worktree
+    # (ai_sdlc.agents.developer.worktree), regardless of which
+    # CodingCapability provider is configured.
+    init_git_repo(workspace)
     bootstrap.write_agent_metadata(workspace)
     _write_interrupt_once_stub_agent(tmp_path, workspace, "ux", "approval", "cli_approval_stub_agent")
 
@@ -780,9 +844,17 @@ def test_approval_interrupt_approve_resumes_to_completion(approval_stub_server, 
     assert start_result.exit_code == 0, start_result.output
     assert "Approval requested" in start_result.output
 
+    # `approve` is a discrete, one-shot command -- it resolves this one
+    # approval and reports whatever the workflow stops at next, which is
+    # now Development's own approval request (real development runs after
+    # the stubbed ux node resolves).
     approve_result = runner.invoke(app, ["approve"])
     assert approve_result.exit_code == 0, approve_result.output
-    assert "Workflow completed" in approve_result.output
+    assert "Approval requested" in approve_result.output
+
+    second_approve_result = runner.invoke(app, ["approve"])
+    assert second_approve_result.exit_code == 0, second_approve_result.output
+    assert "Workflow completed" in second_approve_result.output
 
 
 def test_approval_interrupt_reject_reports_revision_required(approval_stub_server, cli_config_dir: Path) -> None:

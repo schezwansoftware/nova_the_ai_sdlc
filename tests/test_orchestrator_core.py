@@ -138,12 +138,14 @@ def test_state_store_supports_multiple_concurrent_workflows(tmp_path):
 
 class AutoCompleteAgent:
     """Minimal stub agent that always completes immediately, with no
-    structured data. Used to stand in for the Architecture/UX stages in
-    tests that are only exercising PO-stage clarification/retry mechanics
-    (the real graph now runs Architecture/UX after PO -- see
-    DEFAULT_WORKFLOW_NODES in orchestration/langgraph_runner.py -- so
-    those stages need *some* registered agent for a resume-to-completion
-    call to actually reach COMPLETED)."""
+    structured data. Used to stand in for the Architecture/UX/Development
+    stages in tests that are only exercising PO-stage clarification/retry
+    mechanics (the real graph now runs Architecture/UX/Development after
+    PO -- see DEFAULT_WORKFLOW_NODES in orchestration/langgraph_runner.py
+    -- so those stages need *some* registered agent for a resume-to-
+    completion call to actually reach COMPLETED; the real DeveloperAgent
+    would interrupt for approval instead, which is deliberately not what
+    these tests are about)."""
 
     def execute(self, request):
         return AgentResult(
@@ -178,6 +180,7 @@ def test_clarification_resume_to_completion_invokes_agent_exactly_once(tmp_path)
     orch.register_agent("po", agent)
     orch.register_agent("architecture", AutoCompleteAgent())
     orch.register_agent("ux", AutoCompleteAgent())
+    orch.register_agent("developer", AutoCompleteAgent())
 
     res = orch.invoke_agent_for_stage(wf, "po")
     assert res["status"] == "needs_clarification"
@@ -216,6 +219,7 @@ def test_clarification_answers_accumulate_across_rounds(tmp_path):
     orch.register_agent("po", agent)
     orch.register_agent("architecture", AutoCompleteAgent())
     orch.register_agent("ux", AutoCompleteAgent())
+    orch.register_agent("developer", AutoCompleteAgent())
 
     res1 = orch.invoke_agent_for_stage(wf, "po")
     assert res1["status"] == "needs_clarification"

@@ -28,8 +28,10 @@ from pathlib import Path
 
 from ai_sdlc.agents.architecture.architecture_agent import ArchitectureAgent
 from ai_sdlc.agents.base import AgentDecision, AgentResult, AgentStatus, ArtifactRef
+from ai_sdlc.agents.developer.developer_agent import DeveloperAgent
 from ai_sdlc.agents.po.po_agent import POAgent
 from ai_sdlc.agents.ux.ux_agent import UXAgent
+from ai_sdlc.capabilities.providers.coding_mock import MockCodingProvider
 from ai_sdlc.orchestration.api import (
     GetWorkflowStatusRequest,
     OrchestratorAPI,
@@ -39,6 +41,7 @@ from ai_sdlc.orchestration.api import (
     WorkflowPhase,
     WorkflowStatusType,
 )
+from tests.conftest import init_git_repo
 
 _REQUIREMENT_TEXT = (
     "Add support for Redis caching to our order service to reduce DB load "
@@ -53,8 +56,16 @@ _NO_UI_REQUIREMENT_TEXT = (
 
 def _make_api(tmp_path: Path) -> OrchestratorAPI:
     workspace = tmp_path / "repo"
-    workspace.mkdir()
+    # A real git repository, not just a directory: the Development node
+    # always creates a real isolated git worktree
+    # (ai_sdlc.agents.developer.worktree), regardless of which
+    # CodingCapability provider is configured.
+    init_git_repo(workspace)
     return OrchestratorAPI(str(workspace))
+
+
+def _register_developer(api: OrchestratorAPI) -> None:
+    api.orch.register_agent("developer", DeveloperAgent(MockCodingProvider()))
 
 
 class _InterruptOnceThenCompleteAgent:
@@ -86,6 +97,13 @@ class _InterruptOnceThenCompleteAgent:
                 workflow_id=request.workflow_id,
                 agent_id=self.agent_id,
                 status=AgentStatus.NEEDS_APPROVAL,
+                # Real, final data attached to the approval request itself,
+                # matching the second (post-resume) call's data below --
+                # approval-resume no longer re-invokes the requesting agent
+                # (LangGraphRunner.resume_after_approval), so this must
+                # already be complete when approval is requested, not
+                # produced by a call that never happens.
+                data={"stage": self.agent_id, "resolved": True},
                 artifact=ArtifactRef(type=self.agent_id, path=f".ai-sdlc/{self.agent_id}.json"),
                 decision=AgentDecision(status="ready_for_approval", approval_required=True),
             )
@@ -103,18 +121,23 @@ def test_start_workflow_runs_po_architecture_ux_to_completion(tmp_path):
     api.orch.register_agent("po", POAgent())
     api.orch.register_agent("architecture", ArchitectureAgent())
     api.orch.register_agent("ux", UXAgent())
+    _register_developer(api)
 
     resp = api.start_workflow(
         StartWorkflowRequest(initiator_id="u1", raw_requirement=_REQUIREMENT_TEXT, project_context={})
     )
     assert resp.success, resp.error
     workflow_id = resp.data.workflow_id
-    assert resp.data.status == WorkflowStatusType.COMPLETED
-    assert resp.data.current_phase == WorkflowPhase.COMPLETED
+    # PO -> Architecture -> UX_design all complete; Development then runs
+    # for real (MockCodingProvider) and always interrupts for approval
+    # once it succeeds rather than auto-completing (see DeveloperAgent's
+    # module docstring) -- that's the real terminus of a full run now.
+    assert resp.data.status == WorkflowStatusType.WAITING_FOR_APPROVAL
+    assert resp.data.current_phase == WorkflowPhase.DEVELOPMENT
 
     status_resp = api.get_workflow_status(GetWorkflowStatusRequest(workflow_id=workflow_id))
     assert status_resp.success
-    assert status_resp.data.status == WorkflowStatusType.COMPLETED
+    assert status_resp.data.status == WorkflowStatusType.WAITING_FOR_APPROVAL
     assert status_resp.data.artifacts.get("requirements") == "completed"
     assert status_resp.data.artifacts.get("architecture") == "completed"
     assert status_resp.data.artifacts.get("ux_design") == "completed"
@@ -127,6 +150,23 @@ def test_start_workflow_runs_po_architecture_ux_to_completion(tmp_path):
     assert isinstance(wf.inputs.get("ux_design"), dict)
     assert "Redis" in wf.inputs["architecture"]["tech_stack"]
 
+    # Approving finishes the workflow -- the real end-to-end proof that a
+    # code change was produced and is waiting to be pushed (a deferred
+    # follow-up pass; see DeveloperAgent's module docstring).
+    approval_id = status_resp.data.pending_action.interaction_id
+    approve_resp = api.submit_approval(
+        SubmitApprovalRequest(workflow_id=workflow_id, initiator_id="u1", approval_id=approval_id, approved=True)
+    )
+    assert approve_resp.success, approve_resp.error
+    assert approve_resp.data.status == WorkflowStatusType.COMPLETED
+    assert approve_resp.data.current_phase == WorkflowPhase.COMPLETED
+
+    wf_final = api.orch.load_workflow(workflow_id)
+    development = wf_final.inputs.get("development")
+    assert isinstance(development, dict)
+    assert development["provider_name"] == "mock_coding_provider"
+    assert development["branch_name"]
+
 
 def test_no_ui_requirement_skips_ux_design_stage(tmp_path):
     """Architecture classifies a headless/backend-only requirement as
@@ -138,14 +178,19 @@ def test_no_ui_requirement_skips_ux_design_stage(tmp_path):
     api.orch.register_agent("po", POAgent())
     api.orch.register_agent("architecture", ArchitectureAgent())
     api.orch.register_agent("ux", UXAgent())
+    _register_developer(api)
 
     resp = api.start_workflow(
         StartWorkflowRequest(initiator_id="u5", raw_requirement=_NO_UI_REQUIREMENT_TEXT, project_context={})
     )
     assert resp.success, resp.error
     workflow_id = resp.data.workflow_id
-    assert resp.data.status == WorkflowStatusType.COMPLETED
-    assert resp.data.current_phase == WorkflowPhase.COMPLETED
+    # UX_design is skipped, but Development still runs (it doesn't require
+    # UX -- see DeveloperAgent.check_needs_clarification) and, like the
+    # happy-path test above, always interrupts for approval once it
+    # succeeds rather than auto-completing.
+    assert resp.data.status == WorkflowStatusType.WAITING_FOR_APPROVAL
+    assert resp.data.current_phase == WorkflowPhase.DEVELOPMENT
 
     status_resp = api.get_workflow_status(GetWorkflowStatusRequest(workflow_id=workflow_id))
     assert status_resp.success
@@ -165,6 +210,7 @@ def test_clarification_mid_sequence_resumes_into_next_node(tmp_path):
     arch_stub = _InterruptOnceThenCompleteAgent("architecture", "clarification")
     api.orch.register_agent("architecture", arch_stub)
     api.orch.register_agent("ux", UXAgent())
+    _register_developer(api)
 
     resp = api.start_workflow(
         StartWorkflowRequest(initiator_id="u2", raw_requirement=_REQUIREMENT_TEXT, project_context={})
@@ -203,9 +249,11 @@ def test_clarification_mid_sequence_resumes_into_next_node(tmp_path):
     # Resuming re-invokes Architecture (now COMPLETED) and correctly
     # advances into UX_design next, which also completes -- proving
     # resume_workflow_after_clarification resumes into the *next* node,
-    # not just re-completing the interrupted one.
-    assert clar_resp.data.status == WorkflowStatusType.COMPLETED
-    assert clar_resp.data.current_phase == WorkflowPhase.COMPLETED
+    # not just re-completing the interrupted one. The graph then reaches
+    # Development, which always interrupts for approval once it succeeds
+    # rather than auto-completing.
+    assert clar_resp.data.status == WorkflowStatusType.WAITING_FOR_APPROVAL
+    assert clar_resp.data.current_phase == WorkflowPhase.DEVELOPMENT
     assert arch_stub.calls == 2
 
     wf_final = api.orch.load_workflow(workflow_id)
@@ -220,6 +268,7 @@ def test_approval_mid_sequence_resumes_and_completes_workflow(tmp_path):
     api.orch.register_agent("architecture", ArchitectureAgent())
     ux_stub = _InterruptOnceThenCompleteAgent("ux", "approval")
     api.orch.register_agent("ux", ux_stub)
+    _register_developer(api)
 
     resp = api.start_workflow(
         StartWorkflowRequest(initiator_id="u3", raw_requirement=_REQUIREMENT_TEXT, project_context={})
@@ -249,9 +298,15 @@ def test_approval_mid_sequence_resumes_and_completes_workflow(tmp_path):
         SubmitApprovalRequest(workflow_id=workflow_id, initiator_id="u3", approval_id=approval_id, approved=True)
     )
     assert approve_resp.success, approve_resp.error
-    assert approve_resp.data.status == WorkflowStatusType.COMPLETED
-    assert approve_resp.data.current_phase == WorkflowPhase.COMPLETED
-    assert ux_stub.calls == 2
+    # Approval-resume advances past the node instead of re-invoking it (see
+    # LangGraphRunner.resume_after_approval) -- the stub is never called a
+    # second time; its approved `data` carries forward on its own. The
+    # graph then reaches Development, which runs for real
+    # (MockCodingProvider) and interrupts for its own approval rather than
+    # completing the workflow outright.
+    assert approve_resp.data.status == WorkflowStatusType.WAITING_FOR_APPROVAL
+    assert approve_resp.data.current_phase == WorkflowPhase.DEVELOPMENT
+    assert ux_stub.calls == 1
 
     wf_final = api.orch.load_workflow(workflow_id)
     assert wf_final.stages.get("ux_design") == "completed"
@@ -273,6 +328,7 @@ def test_clarification_on_first_node_resolves_instead_of_looping_forever(tmp_pat
     api.orch.register_agent("po", POAgent())
     api.orch.register_agent("architecture", ArchitectureAgent())
     api.orch.register_agent("ux", UXAgent())
+    _register_developer(api)
 
     resp = api.start_workflow(
         StartWorkflowRequest(
@@ -304,9 +360,12 @@ def test_clarification_on_first_node_resolves_instead_of_looping_forever(tmp_pat
     # The bug: this would come back WAITING_FOR_CLARIFICATION again, on the
     # same "requirements" phase, with a brand-new question_id but the
     # identical question -- an infinite loop. Fixed: PO accepts the answer
-    # and the graph advances all the way through Architecture/UX.
-    assert clar_resp.data.status == WorkflowStatusType.COMPLETED
-    assert clar_resp.data.current_phase == WorkflowPhase.COMPLETED
+    # and the graph advances all the way through Architecture/UX/
+    # Development, ending in Development's own approval interrupt (it
+    # always requests approval once it succeeds rather than
+    # auto-completing).
+    assert clar_resp.data.status == WorkflowStatusType.WAITING_FOR_APPROVAL
+    assert clar_resp.data.current_phase == WorkflowPhase.DEVELOPMENT
 
     wf_final = api.orch.load_workflow(workflow_id)
     assert wf_final.stages.get("requirements") == "completed"

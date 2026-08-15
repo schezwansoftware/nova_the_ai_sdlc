@@ -2,8 +2,10 @@ import pytest
 from pydantic import ValidationError
 
 from ai_sdlc.agents.architecture.architecture_agent import ArchitectureAgent
+from ai_sdlc.agents.developer.developer_agent import DeveloperAgent
 from ai_sdlc.agents.po.po_agent import POAgent
 from ai_sdlc.agents.ux.ux_agent import UXAgent
+from ai_sdlc.capabilities.providers.coding_mock import MockCodingProvider
 from ai_sdlc.orchestration.api import (
     CancelWorkflowRequest,
     ErrorCode,
@@ -17,18 +19,25 @@ from ai_sdlc.orchestration.api import (
     WorkflowStatusType,
 )
 from ai_sdlc.orchestration.state import WorkflowState
+from tests.conftest import init_git_repo
 
 
 def test_start_and_get_status(tmp_path):
     workspace = tmp_path / "repo"
-    workspace.mkdir()
+    # A real git repository, not just a directory: the Development node
+    # always creates a real isolated git worktree
+    # (ai_sdlc.agents.developer.worktree), regardless of which
+    # CodingCapability provider is configured.
+    init_git_repo(workspace)
     api = OrchestratorAPI(str(workspace))
     api.orch.register_agent("po", POAgent())
-    # The real workflow graph now also runs Architecture and UX after PO
-    # (see DEFAULT_WORKFLOW_NODES in orchestration/langgraph_runner.py), so
-    # a full start_workflow() run needs both registered too.
+    # The real workflow graph now also runs Architecture/UX/Development
+    # after PO (see DEFAULT_WORKFLOW_NODES in
+    # orchestration/langgraph_runner.py), so a full start_workflow() run
+    # needs all three registered too.
     api.orch.register_agent("architecture", ArchitectureAgent())
     api.orch.register_agent("ux", UXAgent())
+    api.orch.register_agent("developer", DeveloperAgent(MockCodingProvider()))
 
     req = StartWorkflowRequest(initiator_id="u1", raw_requirement="Add export functionality for customers.", project_context={})
     resp = api.start_workflow(req)
@@ -93,11 +102,16 @@ def test_approval_submit_and_resume(tmp_path):
     workspace = tmp_path / "repo"
     workspace.mkdir()
     api = OrchestratorAPI(str(workspace))
-    api.orch.register_agent("po", POAgent())
 
-    wf = WorkflowState(workflow_id="wf-a", current_stage="requirements", initiator_id="u3")
+    # Parked on "development" -- the last DEFAULT_WORKFLOW_NODES node -- so
+    # approval-resume (which advances past the approved node instead of
+    # re-invoking its agent, see LangGraphRunner.resume_after_approval)
+    # completes the workflow directly with no further agent invocation,
+    # keeping this test focused on the public API's approval mechanics
+    # rather than needing po/architecture/ux/developer all registered.
+    wf = WorkflowState(workflow_id="wf-a", current_stage="development", initiator_id="u3")
     wf.status = "waiting_for_approval"
-    wf.pending_approval = {"approval_id": "approval-1234", "stage": "requirements", "artifact": {}, "inputs": {}}
+    wf.pending_approval = {"approval_id": "approval-1234", "stage": "development", "artifact": {}, "inputs": {}}
     api.orch.store.write_workflow(wf)
 
     req = SubmitApprovalRequest(workflow_id=wf.workflow_id, initiator_id="u3", approval_id="approval-1234", approved=True)

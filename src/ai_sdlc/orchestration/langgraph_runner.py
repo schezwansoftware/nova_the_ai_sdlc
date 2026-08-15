@@ -5,28 +5,36 @@ from ai_sdlc.orchestration.orchestrator import Orchestrator
 from ai_sdlc.orchestration.state import WorkflowState, WorkflowStatus
 
 
-# Default MVP workflow graph: PO -> Architecture -> UX design, executed
-# sequentially (see docs/architecture/v1_architecture.md section 5.2's
-# WorkflowPhase ordering; LangGraphRunner has no branching support today,
-# so Architecture/UX -- both independent consumers of PO's output -- run
-# one after another rather than in parallel).
+# Default MVP workflow graph: PO -> Architecture -> UX design -> Development,
+# executed sequentially (see docs/architecture/v1_architecture.md section
+# 5.2's WorkflowPhase ordering; LangGraphRunner has no branching support
+# today, so Architecture/UX -- both independent consumers of PO's output --
+# run one after another rather than in parallel).
 #
 # This is the single source of truth for the node list: Orchestrator's
 # run_workflow_graph / resume_workflow_after_clarification /
 # resume_workflow_after_approval all import this rather than hardcoding
-# their own copies, so extending the workflow (e.g. adding a Development
-# node next) only requires editing this one list.
+# their own copies, so extending the workflow only requires editing this
+# one list.
 #
 # Each node's optional "output_key" tells Orchestrator.invoke_agent_for_stage
 # where to merge that node's AgentResult.data onto wf.inputs once it
-# COMPLETEs, so the next node automatically receives it as part of its
-# merged inputs (see Orchestrator.invoke_agent_for_stage). Both the
-# Architecture and UX agents read PO's structured output via
-# request.inputs["requirements"].
+# COMPLETEs (or is approved -- see resume_after_approval below), so the
+# next node automatically receives it as part of its merged inputs (see
+# Orchestrator.invoke_agent_for_stage). Architecture, UX, and Development
+# all read prior nodes' structured output this way -- e.g. Development
+# reads PO's/Architecture's/UX's via request.inputs["requirements"] /
+# ["architecture"] / ["ux_design"].
+#
+# "development"'s id (not "developer", the agent_id) matches
+# OrchestratorAPI._STAGE_TO_PHASE's existing "development" ->
+# WorkflowPhase.DEVELOPMENT entry (orchestration/api.py) -- that mapping
+# already anticipated this node before it existed.
 DEFAULT_WORKFLOW_NODES: List[Dict[str, Any]] = [
     {"id": "requirements", "type": "agent", "agent_id": "po", "output_key": "requirements"},
     {"id": "architecture", "type": "agent", "agent_id": "architecture", "output_key": "architecture"},
     {"id": "ux_design", "type": "agent", "agent_id": "ux", "output_key": "ux_design"},
+    {"id": "development", "type": "agent", "agent_id": "developer", "output_key": "development"},
 ]
 
 
@@ -137,6 +145,46 @@ class LangGraphRunner:
         if not isinstance(architecture, dict):
             return False
         return architecture.get("requires_ui") is False
+
+    def resume_after_approval(self, approval_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Advance past the just-approved node without re-invoking its agent.
+
+        Mirrors `resume_after_clarification` below: `current_stage` is left
+        pointing at the interrupted node by `invoke_agent_for_stage`'s
+        NEEDS_APPROVAL branch (see that method), so naively calling `run()`
+        here would re-match the same node and re-execute `agent.execute()`
+        from scratch -- correct for a cheap, deterministic reasoning-only
+        agent, but wrong (and potentially expensive/non-deterministic) for
+        any Tier 3 agent whose approved output came from real, already-
+        completed work (e.g. the Developer Agent's coding-provider session).
+        `approval_data` is `wf.pending_approval["data"]` -- the requesting
+        `AgentResult.data` that `invoke_agent_for_stage` now persists
+        alongside the approval record precisely so it survives this resume
+        without needing to be regenerated.
+        """
+        current_stage = self.wf.current_stage
+        if not current_stage:
+            return {"status": "no_active_stage"}
+        node_index = next((i for i, n in enumerate(self.nodes) if n.get("id") == current_stage), None)
+        if node_index is None:
+            return {"status": "unknown_stage"}
+        node = self.nodes[node_index]
+        output_key = node.get("output_key")
+        if output_key and approval_data is not None:
+            self.wf.inputs[output_key] = approval_data
+        self.wf.stages[current_stage] = "completed"
+
+        next_index = node_index + 1
+        if next_index >= len(self.nodes):
+            self.wf.current_stage = None
+            self.wf.status = WorkflowStatus.COMPLETED
+            self.orch.save_workflow(self.wf)
+            self.orch._emit({"event": "workflow_completed", "workflow_id": self.wf.workflow_id})
+            return {"status": "completed"}
+
+        self.wf.current_stage = self.nodes[next_index].get("id")
+        self.orch.save_workflow(self.wf)
+        return self.run(start_index=next_index)
 
     def resume_after_clarification(self, answer: str, question_id: str) -> Dict[str, Any]:
         # Provide the answer as input to the current agent and continue execution.

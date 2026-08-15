@@ -44,12 +44,25 @@ class POAgent(SpecialistAgent):
         # approval workflow progression -- but returning NEEDS_APPROVAL here
         # deterministically exercises the Orchestrator's existing
         # needs_approval handling path without requiring a real LLM.
+        #
+        # Runs the real flow first and only overrides a COMPLETED result's
+        # status, rather than short-circuiting before any real work happens:
+        # Orion's approval-resume no longer re-invokes the requesting agent
+        # once approved (see Orchestrator.resume_workflow_after_approval /
+        # LangGraphRunner.resume_after_approval), so an agent that requests
+        # approval must produce its real, final `data` *before* asking, not
+        # promise to produce it "later" -- there is no later call. This hook
+        # models that correctly rather than a since-removed pattern.
         if inputs.get("force") == "approval":
+            result = super().execute(request)
+            if result.status != AgentStatus.COMPLETED:
+                return result
             return AgentResult(
-                request_id=request.request_id,
-                workflow_id=request.workflow_id,
-                agent_id=self.agent_id,
+                request_id=result.request_id,
+                workflow_id=result.workflow_id,
+                agent_id=result.agent_id,
                 status=AgentStatus.NEEDS_APPROVAL,
+                data=result.data,
                 artifact=ArtifactRef(type="requirements", path=".ai-sdlc/requirements.json"),
                 decision=AgentDecision(status="ready_for_approval", approval_required=True),
             )

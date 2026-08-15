@@ -237,7 +237,19 @@ class OrchestratorAPI:
                 workflow_id=wf_id,
                 current_stage="requirements",
                 initiator_id=req.initiator_id,
-                inputs={"requirement_text": req.raw_requirement, "project_context": req.project_context},
+                inputs={
+                    "requirement_text": req.raw_requirement,
+                    "project_context": req.project_context,
+                    # `ai-sdlc init` runs inside the target application
+                    # repository, so the workspace this StateStore is
+                    # already rooted at *is* that repository -- this closes
+                    # the gap ArchitectureAgent._gather_codebase_context()
+                    # and the (not yet built at the time) Developer Agent
+                    # both read from (`inputs["target_repository"]
+                    # ["workspace_path"]`) but that nothing previously
+                    # populated.
+                    "target_repository": {"workspace_path": str(self.orch.store.workspace)},
+                },
             )
             self.orch.store.write_workflow(wf)
 
