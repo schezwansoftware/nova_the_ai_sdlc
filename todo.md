@@ -475,6 +475,38 @@ PR (see the still-open item above).
       to also delete the approved worktree once it successfully pushes —
       that responsibility was deliberately left to it rather than built
       speculatively here.
+- [ ] **MEDIUM PRIORITY — the human approving a Development change cannot
+      actually see the diff.** Found via direct user review of this pass,
+      not caught before merge. `DeveloperAgent`/`CodingResult` compute real
+      data (`files_changed`, `branch_name`, `summary`,
+      self-check pass/fail) and it does reach `wf.inputs["development"]`
+      server-side, but nothing carries it past that point:
+        - `PendingAction` (`orchestration/api.py`) only has a generic
+          `prompt_message` ("approval requested") and
+          `payload_artifact_path` — a hardcoded string like
+          `.ai-sdlc/implementation.json` that **no code ever writes**, since
+          artifact persistence was never built (same underlying gap as "Orion
+          / Core — UX_DESIGN wiring follow-up" above, just for Development's
+          own artifact instead of UX's).
+        - The CLI's approval panel (`cli/formatters.py::
+          pending_action_renderable`) only ever renders `prompt_message` +
+          `payload_artifact_path` — so a developer sees "Approval requested"
+          and a path to a file that doesn't exist, with zero visibility into
+          which files changed or what the change actually does, and is asked
+          to blindly `ai-sdlc approve`/`reject`.
+        - The isolated worktree's real path also isn't surfaced anywhere
+          (not in `CodingResult`, not in any API response), so a developer
+          who wanted to manually `cd` in and run `git diff` themselves has no
+          documented way to find it either.
+      `coding.py`'s own module docstring already says `CodingResult.summary`
+      is meant to be "surfaced to the human at the approval gate ... alongside
+      the diff" — this is a wiring gap against that stated intent, not a new
+      requirement. Fix needs: thread the real diff data through
+      `PendingAction`/`WorkflowStatusData` (or a new field), render it in the
+      CLI's approval panel instead of the fake artifact path, and decide
+      whether to show a real `git diff` / worktree path too. Explicitly
+      deferred — user flagged this as important but not urgent, medium
+      priority, do not start without being asked.
 
 ## Sage — follow-up (RetrievalCapability's *codebase-grounding* portion now built differently — see below)
 
