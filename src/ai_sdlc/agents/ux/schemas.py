@@ -32,51 +32,86 @@ default, so the additive keys are purely additive, not breaking.
 """
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 from ai_sdlc.capabilities.design import DesignArtifact, FidelityLevel
 
 
-def _require_nonempty_strings(value: List[str], field_name: str) -> List[str]:
-    if not value:
-        raise ValueError(f"{field_name} must contain at least one item")
+def _require_nonempty_strings(value: List[str], field_name: str, *, skip: bool = False) -> List[str]:
     cleaned = [item.strip() for item in value]
+    if skip:
+        return cleaned
+    if not cleaned:
+        raise ValueError(f"{field_name} must contain at least one item")
     if any(not item for item in cleaned):
         raise ValueError(f"{field_name} must not contain empty strings")
     return cleaned
 
 
 class UXOutputData(BaseModel):
+    # Declared first, same reason as POAgentOutputData/ArchitectureOutputData:
+    # Pydantic v2 validates fields in declaration order, and the fields
+    # below read this one via `ValidationInfo.data` (only already-validated
+    # fields appear there).
+    needs_clarification: bool = Field(
+        default=False,
+        description=(
+            "True only if the requirements are genuinely too ambiguous to "
+            "design a meaningful UX flow without guessing at something "
+            "important -- a real blocker, not a minor unstated detail you "
+            "could reasonably assume. When true, set `clarification_question` "
+            "to one specific, answerable question and the other fields may be "
+            "left empty/minimal; they are not used. Default to false and "
+            "proceed with a reasonable, explicitly stated assumption instead "
+            "of asking -- an agent that interrupts for anything less than a "
+            "real blocker is worse than one that makes a sensible assumption "
+            "and says so."
+        ),
+    )
+    clarification_question: Optional[str] = Field(
+        default=None,
+        description="Required, non-empty, when `needs_clarification` is true; otherwise unused.",
+    )
     flow_title: str
     summary: str
     user_flows: List[str]
     screens: List[str]
     accessibility_considerations: List[str]
 
+    @staticmethod
+    def _skip_nonempty(info: ValidationInfo) -> bool:
+        return bool(info.data.get("needs_clarification"))
+
+    @model_validator(mode="after")
+    def _clarification_question_required_when_needed(self) -> "UXOutputData":
+        if self.needs_clarification and not (self.clarification_question or "").strip():
+            raise ValueError("clarification_question must not be empty when needs_clarification is true")
+        return self
+
     @field_validator("flow_title", "summary")
     @classmethod
-    def _nonempty_str(cls, value: str) -> str:
+    def _nonempty_str(cls, value: str, info: ValidationInfo) -> str:
         value = (value or "").strip()
-        if not value:
+        if not value and not cls._skip_nonempty(info):
             raise ValueError("must not be empty")
         return value
 
     @field_validator("user_flows")
     @classmethod
-    def _user_flows_nonempty(cls, value: List[str]) -> List[str]:
-        return _require_nonempty_strings(value, "user_flows")
+    def _user_flows_nonempty(cls, value: List[str], info: ValidationInfo) -> List[str]:
+        return _require_nonempty_strings(value, "user_flows", skip=cls._skip_nonempty(info))
 
     @field_validator("screens")
     @classmethod
-    def _screens_nonempty(cls, value: List[str]) -> List[str]:
-        return _require_nonempty_strings(value, "screens")
+    def _screens_nonempty(cls, value: List[str], info: ValidationInfo) -> List[str]:
+        return _require_nonempty_strings(value, "screens", skip=cls._skip_nonempty(info))
 
     @field_validator("accessibility_considerations")
     @classmethod
-    def _accessibility_considerations_nonempty(cls, value: List[str]) -> List[str]:
-        return _require_nonempty_strings(value, "accessibility_considerations")
+    def _accessibility_considerations_nonempty(cls, value: List[str], info: ValidationInfo) -> List[str]:
+        return _require_nonempty_strings(value, "accessibility_considerations", skip=cls._skip_nonempty(info))
 
 
 class VisualDesignPackage(BaseModel):

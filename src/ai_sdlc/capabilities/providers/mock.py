@@ -143,7 +143,7 @@ class MockReasoningProvider(ReasoningCapability):
         payload = self._derive_payload(prompt, output_schema)
 
         if effective == "malformed":
-            payload = self._malform(payload)
+            payload = self._malform(payload, output_schema)
 
         try:
             return output_schema(**payload)
@@ -160,7 +160,17 @@ class MockReasoningProvider(ReasoningCapability):
         for name, field in output_schema.model_fields.items():
             annotation = field.annotation
             origin = get_origin(annotation)
-            if origin in (list, List):
+            if name == "clarification_question":
+                # Optional[str], paired with `needs_clarification` (see
+                # `_bool_value`) -- the mock never asks the LLM-driven
+                # clarification question (that's deliberately not something
+                # a keyword-rule mock can honestly simulate), so this is
+                # always unused/None. Handled by name before the type-based
+                # dispatch below since `Optional[str]` would otherwise fall
+                # into the generic `_str_value` branch and get populated
+                # with unused placeholder text.
+                payload[name] = None
+            elif origin in (list, List):
                 payload[name] = self._list_value(name, sentences)
             elif annotation is bool:
                 payload[name] = self._bool_value(name, sentences)
@@ -168,28 +178,44 @@ class MockReasoningProvider(ReasoningCapability):
                 payload[name] = self._str_value(name, sentences, prompt)
         return payload
 
-    def _malform(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _malform(self, payload: Dict[str, Any], output_schema: Type[BaseModel]) -> Dict[str, Any]:
         """Deliberately corrupt a valid payload so schema validation fails.
 
-        Drops one required field entirely (rather than e.g. setting it to
-        an empty string) so this works generically across any schema
-        Craft defines, without needing to know that schema's specific
-        field names/validators.
+        Drops one *required* field entirely (rather than e.g. setting it to
+        an empty string) so this works generically across any schema Craft
+        defines, without needing to know that schema's specific field
+        names/validators. Must specifically be a required field (no
+        default) -- since `needs_clarification`/`clarification_question`
+        both have defaults, dropping either of those wouldn't actually
+        break validation (Pydantic would just apply the default), which is
+        exactly the bug this used to have when it dropped whichever key
+        sorted first regardless of whether it was required.
         """
         corrupted = dict(payload)
-        if corrupted:
-            drop_key = sorted(corrupted.keys())[0]
-            corrupted.pop(drop_key)
+        required_keys = sorted(name for name in corrupted if output_schema.model_fields[name].is_required())
+        if required_keys:
+            corrupted.pop(required_keys[0])
         return corrupted
 
     def _bool_value(self, name: str, sentences: List[str]) -> bool:
         """Rule-based value for a boolean field, keyed by field name --
-        same style as `_str_value`/`_list_value`. Currently only
-        `requires_ui` (Architecture Agent) needs this; defaults to True
-        (assume a UI is needed) for any other/unknown bool field or when no
-        clear no-UI signal is found in the input, matching the schema's own
-        conservative default."""
+        same style as `_str_value`/`_list_value`.
+
+        `needs_clarification` (PO/Architecture/UX, paired with
+        `clarification_question` -- see `_derive_payload`) is always
+        False: this mock is a deterministic wiring oracle, not a stand-in
+        for a real model's judgment about ambiguity -- the pre-LLM
+        `check_needs_clarification()` heuristic gate (see each agent's
+        `*_agent.py`) is what mock-backed tests exercise for clarification
+        behavior instead. Any other bool field defaults to True (currently
+        only `requires_ui`, Architecture Agent -- assume a UI is needed
+        unless a clear no-UI signal is found in the input, matching the
+        schema's own conservative default) since it's the only other bool
+        field that exists today.
+        """
         lname = name.lower()
+        if "needs_clarification" in lname:
+            return False
         if "requires_ui" not in lname:
             return True
 

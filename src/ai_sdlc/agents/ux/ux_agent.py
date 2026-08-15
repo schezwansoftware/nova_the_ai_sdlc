@@ -163,6 +163,21 @@ class UXAgent(SpecialistAgent):
         except (MalformedResponseError, ProviderError) as exc:
             raise AgentExecutionError(str(exc), retryable=True) from exc
 
+        # Same model-driven clarification path as `SpecialistAgent.execute()`
+        # (`framework.py`) -- duplicated here rather than shared because this
+        # `execute()` is itself already a full override (see the module
+        # docstring for why). A UX flow the reasoning call itself couldn't
+        # resolve has nothing meaningful to generate visuals for, so this
+        # returns before ever calling `DesignCapability`.
+        if ux_data.needs_clarification:
+            return AgentResult(
+                request_id=request.request_id,
+                workflow_id=request.workflow_id,
+                agent_id=self.agent_id,
+                status=AgentStatus.NEEDS_CLARIFICATION,
+                questions=[ux_data.clarification_question],
+            )
+
         inputs: Dict[str, Any] = request.inputs or {}
         design_request = _build_design_request(ux_data, inputs)
         try:

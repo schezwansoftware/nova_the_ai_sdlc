@@ -14,7 +14,32 @@ from ai_sdlc.agents.po.po_agent import POAgent
 from ai_sdlc.agents.ux.schemas import UXOutputData
 from ai_sdlc.agents.ux.ux_agent import UXAgent
 from ai_sdlc.capabilities.providers.mock import MockReasoningProvider
+from ai_sdlc.capabilities.reasoning import ReasoningCapability
 from ai_sdlc.orchestration.orchestrator import AgentExecutionError
+
+
+class _StubClarifyingReasoning(ReasoningCapability):
+    """See test_po_agent.py's identical stub for why this exists: a real
+    model deciding, after actually reasoning over a well-formed-but-still-
+    ambiguous prompt, that it needs to ask something -- the pre-LLM
+    `check_needs_clarification()` gate can never see this. Also proves
+    `UXAgent.execute()`'s override (not the shared `SpecialistAgent.execute()`)
+    returns before ever calling `DesignCapability` -- there is nothing
+    meaningful to generate visuals for."""
+
+    def __init__(self, question: str):
+        self.question = question
+
+    def complete(self, prompt, *, output_schema):
+        return output_schema(
+            needs_clarification=True,
+            clarification_question=self.question,
+            flow_title="",
+            summary="",
+            user_flows=[],
+            screens=[],
+            accessibility_considerations=[],
+        )
 
 
 def _make_request(inputs, workflow_id="wf-ux-test"):
@@ -87,6 +112,24 @@ def test_non_dict_requirements_needs_clarification():
     assert result.status == AgentStatus.NEEDS_CLARIFICATION
 
 
+def test_model_driven_clarification_on_well_formed_but_ambiguous_requirements():
+    from unittest.mock import Mock
+
+    stub_design = Mock()
+    agent = UXAgent(
+        reasoning=_StubClarifyingReasoning("Is this for first-time users, returning users, or both?"),
+        design=stub_design,
+    )
+    request = _make_request({"requirements": _SAMPLE_REQUIREMENTS})
+
+    result = agent.execute(request)
+
+    assert result.status == AgentStatus.NEEDS_CLARIFICATION
+    assert result.questions == ["Is this for first-time users, returning users, or both?"]
+    assert result.data is None
+    stub_design.generate.assert_not_called()
+
+
 def test_forced_malformed_provider_output_raises_retryable_agent_execution_error():
     agent = UXAgent(reasoning=MockReasoningProvider(force_error="malformed"))
     request = _make_request({"requirements": _SAMPLE_REQUIREMENTS})
@@ -138,6 +181,34 @@ def test_ux_output_data_rejects_blank_string_list_item():
         "user_flows": ["User clicks export, file downloads."],
         "screens": ["   "],
         "accessibility_considerations": ["Keyboard-accessible export button."],
+    }
+    with pytest.raises(ValidationError):
+        UXOutputData(**payload)
+
+
+def test_ux_output_data_allows_empty_fields_when_needs_clarification():
+    validated = UXOutputData(
+        needs_clarification=True,
+        clarification_question="Who is the primary persona for this flow?",
+        flow_title="",
+        summary="",
+        user_flows=[],
+        screens=[],
+        accessibility_considerations=[],
+    )
+    assert validated.needs_clarification is True
+    assert validated.clarification_question == "Who is the primary persona for this flow?"
+
+
+def test_ux_output_data_requires_clarification_question_when_needs_clarification():
+    payload = {
+        "needs_clarification": True,
+        "clarification_question": None,  # missing -- must be rejected, not silently accepted
+        "flow_title": "",
+        "summary": "",
+        "user_flows": [],
+        "screens": [],
+        "accessibility_considerations": [],
     }
     with pytest.raises(ValidationError):
         UXOutputData(**payload)

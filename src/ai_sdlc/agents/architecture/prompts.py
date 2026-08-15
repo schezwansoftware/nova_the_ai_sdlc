@@ -24,9 +24,13 @@ Constraints:
   non-functional requirements that motivated each decision.
 - Call out risks or constraints an implementer should be aware of before
   starting development.
-- If the requirements provided are missing or empty, do not guess -- a
-  clarification question should be raised instead (this decision is made
-  before this prompt is ever sent).
+- Missing/empty requirements are already filtered before this prompt is
+  ever sent. That does not mean the requirements are unambiguous for
+  architecture purposes: if they leave a real architectural decision
+  genuinely open (e.g. no hint at expected scale, or a choice with no
+  reasonable default), do not guess -- use `needs_clarification` below
+  instead. Reserve this for a real blocker, not a minor unstated detail;
+  prefer stating a reasonable assumption and proceeding whenever you can.
 - When real codebase context is provided below, ground component_changes
   and decisions in what actually exists in the repository rather than
   assuming a greenfield implementation; when no codebase context is
@@ -35,6 +39,13 @@ Constraints:
 
 OUTPUT_STRUCTURE = """\
 Produce a structured architecture with exactly these fields:
+- needs_clarification: true only if the requirements are genuinely too
+  ambiguous to design a meaningful architecture without guessing at
+  something important. When true, set clarification_question to one
+  specific, answerable question and leave the fields below empty/minimal
+  -- they are not used. Default to false.
+- clarification_question: required, non-empty, when needs_clarification is
+  true; otherwise unused.
 - tech_stack: list of target technologies/frameworks/datastores to use
 - component_changes: list of component-level changes required (what needs to be created/modified)
 - decisions: list of key architectural decisions made

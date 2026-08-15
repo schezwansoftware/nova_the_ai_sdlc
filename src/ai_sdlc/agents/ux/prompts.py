@@ -30,13 +30,24 @@ Constraints:
   (keyboard navigation, screen-reader support, color contrast, etc.)
   implied by the feature, not generic boilerplate when better detail is
   available.
-- If the requirements provided are missing or empty, do not guess -- a
-  clarification question should be raised instead (this decision is made
-  before this prompt is ever sent).
+- Missing/empty requirements are already filtered before this prompt is
+  ever sent. That does not mean the requirements are unambiguous for UX
+  purposes: if they leave a real UX decision genuinely open (e.g. no hint
+  at who the user is or what they're trying to accomplish), do not guess
+  -- use `needs_clarification` below instead. Reserve this for a real
+  blocker, not a minor unstated detail; prefer stating a reasonable
+  assumption and proceeding whenever you can.
 """
 
 OUTPUT_STRUCTURE = """\
 Produce a structured UX design with exactly these fields:
+- needs_clarification: true only if the requirements are genuinely too
+  ambiguous to design a meaningful UX flow without guessing at something
+  important. When true, set clarification_question to one specific,
+  answerable question and leave the fields below empty/minimal -- they are
+  not used. Default to false.
+- clarification_question: required, non-empty, when needs_clarification is
+  true; otherwise unused.
 - flow_title: a short, human-readable label for the primary user flow
 - summary: 1-2 sentence summary of the overall UX approach
 - user_flows: list of step-by-step descriptions of each key user journey

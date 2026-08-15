@@ -13,7 +13,32 @@ from ai_sdlc.agents.base import AgentRequest, AgentStatus
 from ai_sdlc.agents.po.po_agent import POAgent
 from ai_sdlc.agents.po.schemas import POAgentOutputData
 from ai_sdlc.capabilities.providers.mock import MockReasoningProvider
+from ai_sdlc.capabilities.reasoning import ReasoningCapability
 from ai_sdlc.orchestration.orchestrator import AgentExecutionError
+
+
+class _StubClarifyingReasoning(ReasoningCapability):
+    """Simulates a real model that, after actually reasoning over a
+    well-formed-but-ambiguous prompt, decides it needs to ask something --
+    the case the pre-LLM `check_needs_clarification()` heuristic gate can
+    never see (it only ever looks at the raw input text, before any
+    reasoning call happens at all). See `framework.py`'s `needs_clarification`
+    handling in `SpecialistAgent.execute()`."""
+
+    def __init__(self, question: str):
+        self.question = question
+
+    def complete(self, prompt, *, output_schema):
+        return output_schema(
+            needs_clarification=True,
+            clarification_question=self.question,
+            feature_title="",
+            summary="",
+            functional_requirements=[],
+            non_functional_requirements=[],
+            out_of_scope=[],
+            acceptance_criteria=[],
+        )
 
 
 def _make_request(inputs, workflow_id="wf-po-test"):
@@ -112,6 +137,23 @@ def test_clarification_answer_resolves_ambiguity_even_though_requirement_text_is
     assert validated.feature_title
 
 
+def test_model_driven_clarification_on_well_formed_but_ambiguous_input():
+    """A requirement that clears the pre-LLM gate (long enough, no
+    vagueness markers) but is still genuinely ambiguous -- the reasoning
+    call itself must be able to raise NEEDS_CLARIFICATION, not just the
+    heuristic gate before it."""
+    agent = POAgent(reasoning=_StubClarifyingReasoning("Which user roles should be able to trigger this?"))
+    request = _make_request(
+        {"requirement_text": "Add a permissions system so certain actions require elevated access."}
+    )
+
+    result = agent.execute(request)
+
+    assert result.status == AgentStatus.NEEDS_CLARIFICATION
+    assert result.questions == ["Which user roles should be able to trigger this?"]
+    assert result.data is None
+
+
 def test_force_clarify_hook():
     agent = POAgent()
     request = _make_request({"requirement_text": "Add export feature", "force": "clarify"})
@@ -178,6 +220,36 @@ def test_po_agent_output_data_rejects_empty_required_list():
         "non_functional_requirements": ["Must be fast."],
         "out_of_scope": [],
         "acceptance_criteria": ["Verify export works."],
+    }
+    with pytest.raises(ValidationError):
+        POAgentOutputData(**payload)
+
+
+def test_po_agent_output_data_allows_empty_fields_when_needs_clarification():
+    validated = POAgentOutputData(
+        needs_clarification=True,
+        clarification_question="Who is the primary user of this feature?",
+        feature_title="",
+        summary="",
+        functional_requirements=[],
+        non_functional_requirements=[],
+        out_of_scope=[],
+        acceptance_criteria=[],
+    )
+    assert validated.needs_clarification is True
+    assert validated.clarification_question == "Who is the primary user of this feature?"
+
+
+def test_po_agent_output_data_requires_clarification_question_when_needs_clarification():
+    payload = {
+        "needs_clarification": True,
+        "clarification_question": "   ",  # blank -- must be rejected, not silently accepted
+        "feature_title": "",
+        "summary": "",
+        "functional_requirements": [],
+        "non_functional_requirements": [],
+        "out_of_scope": [],
+        "acceptance_criteria": [],
     }
     with pytest.raises(ValidationError):
         POAgentOutputData(**payload)
