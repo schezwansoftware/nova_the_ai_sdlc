@@ -86,15 +86,24 @@ def start(
             "prompted for it interactively."
         ),
     ),
+    no_tui: bool = typer.Option(
+        False,
+        "--no-tui",
+        help=(
+            "Use the plain line-by-line interactive loop instead of the full-screen TUI. "
+            "Useful for terminals that don't support the alt-screen buffer."
+        ),
+    ),
 ) -> None:
     """Start a new workflow and drive it to completion interactively.
 
-    Prompts for the requirement if --prompt isn't given (as text, or as a
-    path to a file containing it), then loops -- auto-continuing through
-    completed stages and prompting inline for any clarification/approval --
-    until the workflow reaches a terminal state.
+    Launches a full-screen session (a scrolling transcript with a single
+    input box) that resolves the requirement if --prompt isn't given, then
+    drives the workflow -- auto-continuing through completed stages and
+    prompting inline for any clarification/approval -- until it reaches a
+    terminal state. Pass --no-tui for the plain line-by-line loop instead.
     """
-    handlers.run_start(console, prompt)
+    handlers.run_start(console, prompt, no_tui=no_tui)
 
 
 @app.command()

@@ -1202,27 +1202,27 @@ ai-sdlc-platform/
 
 ## 12. CLI Architecture
 
-The V1 user experience is powered by a CLI built on `typer` and `rich`, invoking Core's local HTTP REST API, which itself calls the **Orchestrator Public API Facade** — the CLI never imports `orchestration/`/`agents/` code directly (see §12.1).
+The V1 user experience is powered by a CLI built on `typer`, `rich`, and `textual`, invoking Core's local HTTP REST API, which itself calls the **Orchestrator Public API Facade** — the CLI never imports `orchestration/`/`agents/` code directly (see §12.1).
 
 ### Commands
 
 - `ai-sdlc init`: Initializes `.ai-sdlc/` state folder, agent registry metadata, and local CLI config in the target application repository; optionally starts the Core Platform API server as a background process (`--start-server`). Also captures which AI agent framework — `claude` or `copilot` — backs `ReasoningCapability`/`CodingCapability`/`RetrievalCapability` for this workspace (`--agent-framework claude|copilot`; interactive prompt if omitted and nothing is stored yet — see §8.1), a once-per-workspace setting rather than something re-asked per workflow (§4, §8). Deliberately kept **separate** from `start` — set up once, start as many workflows afterward as needed.
-- `ai-sdlc start --prompt "<requirement>"`: The primary human-facing entry point. Calls `start_workflow()`, then **drives the workflow interactively to completion in one continuous session** rather than returning after a single stage (see §12.1 for the loop).
+- `ai-sdlc start [--prompt "<requirement>"]`: The primary human-facing entry point. In an interactive (TTY) session it launches a full-screen chat-style TUI (`cli/tui.py`'s `NovaApp`, built on `textual`) that **drives the workflow to completion in one continuous session** rather than returning after a single stage (see §12.1). `--no-tui` falls back to the plain line-by-line loop this command used before the TUI existed, for terminals that don't support the alt-screen buffer.
 - `ai-sdlc status`, `answer`, `approve`, `reject`, `cancel`: Discrete, scriptable commands mirroring `get_workflow_status()` / `submit_clarification()` / `submit_approval()` / `cancel_workflow()` 1:1. These remain available as manual escape hatches — resuming a session interrupted mid-loop (e.g. Ctrl-C), CI/non-interactive use, or driving a workflow from outside the interactive session — but a human is no longer expected to reach for them as the primary way to drive a workflow.
 
 ### 12.1 `start`'s Interactive Loop
 
-Unlike a single request/response call, `start` keeps running in the foreground and loops until the workflow reaches a terminal status:
+Unlike a single request/response call, `start` keeps running in the foreground and loops until the workflow reaches a terminal status. In an interactive session this loop runs inside `NovaApp`: a full-screen `textual` app with a scrolling transcript filling the screen and a single input box docked at the bottom, used for both the initial requirement and every clarification/approval reply after it — matching the chat-style session a human actually expects, rather than a sequence of discrete printed blocks. `--no-tui` (or a non-interactive/no-TTY session) uses the equivalent plain line-by-line loop instead; both drive the identical server contract below, they only differ in presentation:
 
-1. Invoke the current stage (via `start_workflow()` for the first stage, `resume_workflow()`-equivalent calls thereafter).
+1. Invoke the current stage (via `start_workflow()` for the first stage, `resume_workflow()`-equivalent calls thereafter). Each of these is a blocking HTTP call than can legitimately take up to ~120s against a real provider (§8.1), so it runs off the UI thread with a live "Thinking (using `<framework>`) — `<n>`s..." indicator rather than leaving the session looking frozen.
 2. If the result is `COMPLETED` for that stage, continue automatically to the next stage — no user action required.
-3. If the result is `NEEDS_CLARIFICATION`, print the question inline and prompt the user for a typed answer in the same terminal session; submit it via `submit_clarification()`; continue automatically.
-4. If the result is `NEEDS_APPROVAL`, print the pending artifact/decision and prompt approve/reject inline; submit via `submit_approval()`; continue automatically on approval, or halt with the existing `REVISION_REQUIRED` semantics on rejection.
-5. Exit once the workflow reaches `COMPLETED`, `FAILED`, or `CANCELLED`, printing the final result.
+3. If the result is `NEEDS_CLARIFICATION`, print the question inline and prompt the user for a typed answer in the same input box; submit it via `submit_clarification()`; continue automatically.
+4. If the result is `NEEDS_APPROVAL`, print the pending artifact/decision and prompt approve/reject inline (`y`/`n`, with a follow-up prompt for a rejection reason); submit via `submit_approval()`; continue automatically on approval, or halt with the existing `REVISION_REQUIRED` semantics on rejection.
+5. Exit once the workflow reaches `COMPLETED`, `FAILED`, or `CANCELLED`, printing the final result. The session stays open afterward (scrollback intact) until the user quits (`ctrl+c`/`ctrl+q`), rather than the process exiting immediately.
 
-This changes the CLI's default UX, not the public API contract: every step in the loop is still just `start`/`status`/`answer`/`approve` calls against the unchanged `v1` API — `start` is simply the first client to chain them together automatically on the user's behalf instead of requiring separate manual invocations per stage.
+This changes the CLI's default UX, not the public API contract: every step in the loop is still just `start`/`status`/`answer`/`approve` calls against the unchanged `v1` API — `start` is simply the first client to chain them together automatically on the user's behalf instead of requiring separate manual invocations per stage. Pipeline/clarification/approval rendering itself (`cli/formatters.py`'s `*_renderable()` functions, returning Rich renderables rather than printing them) is shared verbatim between the TUI and the plain line-by-line loop, so the two presentations can never visually drift apart.
 
-**Resolved** (see §20 Q6): non-interactive sessions (no TTY) never block on input — `start` stops at the first pending action and prints the escape-hatch commands instead of prompting, rather than needing a separate `--no-wait` flag. Ctrl-C/EOF mid-loop leaves the workflow exactly where the server already had it paused and exits cleanly, rather than attempting a cancel.
+**Resolved** (see §20 Q6): non-interactive sessions (no TTY) never block on input — `start` stops at the first pending action and prints the escape-hatch commands instead of prompting, rather than needing a separate `--no-wait` flag. Ctrl-C/EOF mid-loop leaves the workflow exactly where the server already had it paused and exits cleanly (in the TUI, printed to the terminal after the app itself exits), rather than attempting a cancel.
 
 ---
 

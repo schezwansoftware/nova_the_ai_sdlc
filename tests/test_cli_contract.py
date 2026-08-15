@@ -376,46 +376,112 @@ def test_happy_path_start_reaches_completed(real_agents_server, cli_config_dir: 
     assert "Workflow completed" in status_result.output
 
 
-def test_start_prints_thinking_hint_when_agent_framework_configured(
-    real_agents_server, cli_config_dir: Path
-) -> None:
-    """A "this may take a while" hint precedes any call that can trigger
-    real agent execution, once a workspace has actually opted into a real
-    agent framework -- see `client.py`'s `DEFAULT_REQUEST_TIMEOUT_SECONDS`
-    docstring for why that call can legitimately be slow now instead of
-    failing fast at the old 15s default. `real_agents_server` never sets
-    `AI_SDLC_AGENT_FRAMEWORK` server-side, so every agent here still uses
-    the deterministic mock -- this test only proves the *hint* fires off
-    the stored CLI-side preference, not that a real provider ran."""
-    workspace, port = real_agents_server
-    _write_config(cli_config_dir, workspace, port=port, agent_framework="claude")
+def test_call_with_thinking_shows_animated_status_when_agent_framework_configured() -> None:
+    """`_call_with_thinking` (`handlers.py`) replaced the old static "this
+    may take a while" print with an animated `console.status()` spinner --
+    see its docstring for why. That spinner is a Rich *Live* render, which
+    Rich only ever emits when it considers the console a real terminal;
+    `CliRunner`'s captured output isn't one, so unlike the old static-print
+    version this can no longer be proven by invoking `start` through
+    `CliRunner` (the hint simply never reaches the captured output at all,
+    real terminal or not). Exercising `_call_with_thinking` directly against
+    a `force_terminal=True` `Console` is what actually observes it."""
+    import io
 
-    start_result = runner.invoke(app, ["start", "--prompt", _REQUIREMENT_TEXT])
+    from rich.console import Console
 
-    assert start_result.exit_code == 0, start_result.output
-    assert "Thinking (using claude)" in start_result.output
+    from ai_sdlc.cli import handlers
 
+    buffer = io.StringIO()
+    console = Console(file=buffer, force_terminal=True, width=80)
+    config = CLIConfig(workspace="/tmp/workspace", initiator_id="u1", current_workflow_id=None, agent_framework="claude")
 
-def test_start_omits_thinking_hint_when_agent_framework_not_configured(
-    real_agents_server, cli_config_dir: Path
-) -> None:
-    workspace, port = real_agents_server
-    _write_config(cli_config_dir, workspace, port=port, agent_framework=None)
+    result = handlers._call_with_thinking(console, config, lambda: "done")
 
-    start_result = runner.invoke(app, ["start", "--prompt", _REQUIREMENT_TEXT])
-
-    assert start_result.exit_code == 0, start_result.output
-    assert "Thinking" not in start_result.output
+    assert result == "done"
+    assert "Thinking (using claude)" in buffer.getvalue()
 
 
-def test_start_without_prompt_asks_interactively_and_rejects_too_short_text(
-    real_agents_server, cli_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+def test_call_with_thinking_skips_status_when_agent_framework_not_configured() -> None:
+    import io
+
+    from rich.console import Console
+
+    from ai_sdlc.cli import handlers
+
+    buffer = io.StringIO()
+    console = Console(file=buffer, force_terminal=True, width=80)
+    config = CLIConfig(workspace="/tmp/workspace", initiator_id="u1", current_workflow_id=None, agent_framework=None)
+
+    result = handlers._call_with_thinking(console, config, lambda: "done")
+
+    assert result == "done"
+    assert "Thinking" not in buffer.getvalue()
+
+
+@pytest.fixture
+def fake_tui(monkeypatch: pytest.MonkeyPatch):
+    """Stands in for `cli.tui.NovaApp` so tests can prove `run_start`
+    launches (or skips) the real TUI without needing an actual terminal --
+    `NovaApp.run()` opens a real terminal driver directly against the
+    process's stdin/stdout, which `CliRunner`'s piped `input=` has no way
+    to satisfy (confirmed directly: it hangs, it doesn't fail fast)."""
+    calls: dict = {}
+
+    class _FakeNovaApp:
+        def __init__(self, config, client, initial_prompt):
+            calls["config"] = config
+            calls["initial_prompt"] = initial_prompt
+            self.left_workflow_paused = False
+
+        def run(self) -> None:
+            calls["ran"] = True
+
+    monkeypatch.setattr("ai_sdlc.cli.tui.NovaApp", _FakeNovaApp)
+    return calls
+
+
+def test_start_interactive_default_launches_tui(
+    real_agents_server, cli_config_dir: Path, monkeypatch: pytest.MonkeyPatch, fake_tui: dict
 ) -> None:
     workspace, port = real_agents_server
     _write_config(cli_config_dir, workspace, port=port)
     monkeypatch.setattr("ai_sdlc.cli.handlers._is_interactive_session", lambda: True)
 
-    result = runner.invoke(app, ["start"], input=f"too short\n{_REQUIREMENT_TEXT}\n")
+    result = runner.invoke(app, ["start", "--prompt", _REQUIREMENT_TEXT])
+
+    assert result.exit_code == 0, result.output
+    assert fake_tui.get("ran") is True
+    assert fake_tui.get("initial_prompt") == _REQUIREMENT_TEXT
+
+
+def test_start_no_tui_flag_skips_tui_even_when_interactive(
+    real_agents_server, cli_config_dir: Path, monkeypatch: pytest.MonkeyPatch, fake_tui: dict
+) -> None:
+    workspace, port = real_agents_server
+    _write_config(cli_config_dir, workspace, port=port)
+    monkeypatch.setattr("ai_sdlc.cli.handlers._is_interactive_session", lambda: True)
+
+    result = runner.invoke(app, ["start", "--prompt", _REQUIREMENT_TEXT, "--no-tui"])
+
+    assert result.exit_code == 0, result.output
+    assert "ran" not in fake_tui
+    assert "Workflow completed" in result.output
+
+
+def test_start_without_prompt_asks_interactively_and_rejects_too_short_text(
+    real_agents_server, cli_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--no-tui`: this exercises the plain line-by-line loop's own
+    requirement prompt specifically (`_resolve_requirement_interactively`)
+    -- the TUI's equivalent input-box prompt is covered at the `NovaApp`
+    level in `test_cli_tui.py`, since `CliRunner` can't drive a real
+    full-screen app (see `fake_tui`'s docstring)."""
+    workspace, port = real_agents_server
+    _write_config(cli_config_dir, workspace, port=port)
+    monkeypatch.setattr("ai_sdlc.cli.handlers._is_interactive_session", lambda: True)
+
+    result = runner.invoke(app, ["start", "--no-tui"], input=f"too short\n{_REQUIREMENT_TEXT}\n")
 
     assert result.exit_code == 0, result.output
     assert "ai-sdlc" in result.output  # banner
@@ -434,7 +500,7 @@ def test_start_without_prompt_reads_requirement_from_file_path(
     requirement_file = tmp_path / "requirement.txt"
     requirement_file.write_text(_REQUIREMENT_TEXT, encoding="utf-8")
 
-    result = runner.invoke(app, ["start"], input=f"{requirement_file}\n")
+    result = runner.invoke(app, ["start", "--no-tui"], input=f"{requirement_file}\n")
 
     assert result.exit_code == 0, result.output
     assert "Read requirement from" in result.output
@@ -484,7 +550,7 @@ def test_interactive_start_resolves_clarification_inline(
 
     result = runner.invoke(
         app,
-        ["start", "--prompt", _REQUIREMENT_TEXT],
+        ["start", "--prompt", _REQUIREMENT_TEXT, "--no-tui"],
         input="Use a modular monolith with a dedicated cache layer.\n",
     )
 
@@ -501,7 +567,7 @@ def test_interactive_start_resolves_approval_approve_inline(
     _write_config(cli_config_dir, workspace, port=port)
     monkeypatch.setattr("ai_sdlc.cli.handlers._is_interactive_session", lambda: True)
 
-    result = runner.invoke(app, ["start", "--prompt", _REQUIREMENT_TEXT], input="y\n")
+    result = runner.invoke(app, ["start", "--prompt", _REQUIREMENT_TEXT, "--no-tui"], input="y\n")
 
     assert result.exit_code == 0, result.output
     assert "Approval requested" in result.output
@@ -517,7 +583,7 @@ def test_interactive_start_resolves_approval_reject_inline_and_halts(
 
     result = runner.invoke(
         app,
-        ["start", "--prompt", _REQUIREMENT_TEXT],
+        ["start", "--prompt", _REQUIREMENT_TEXT, "--no-tui"],
         input="n\nNeeds another pass on accessibility.\n",
     )
 
@@ -556,7 +622,7 @@ def test_interactive_start_keyboard_interrupt_leaves_workflow_paused(
 
     monkeypatch.setattr("rich.console.Console.input", _raise_interrupt)
 
-    result = runner.invoke(app, ["start", "--prompt", _REQUIREMENT_TEXT])
+    result = runner.invoke(app, ["start", "--prompt", _REQUIREMENT_TEXT, "--no-tui"])
 
     assert result.exit_code == 0, result.output
     assert "Interrupted" in result.output
