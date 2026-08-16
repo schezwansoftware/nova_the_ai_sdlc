@@ -48,3 +48,10 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+# Scoped to this package's own tests only -- packages/mcp-connectors/ is a
+# fully independent sibling package with its own pyproject.toml/tests/venv;
+# without this, pytest's default recursive discovery picks up its test
+# files too and fails to collect them here (mcp_connectors isn't installed
+# in this package's own environment, nor should it be -- see
+# packages/mcp-connectors/README.md for why it's independent on purpose).
+testpaths = ["tests"]

@@ -508,6 +508,259 @@ PR (see the still-open item above).
       deferred — user flagged this as important but not urgent, medium
       priority, do not start without being asked.
 
+## Nexus — Knowledge Base Tool Connectors, Phase 1 (this pass, branch `agents/nexus-knowledge-base-connectors`)
+
+**Correction, found via direct user review after the first version of this
+pass (which nested the package at `src/ai_sdlc/mcp_connectors/`) was
+already open as a PR: that layout wasn't actually independent of Nova at
+the packaging level, only at the runtime-call level.** Every internal
+import was absolute and rooted at `ai_sdlc.mcp_connectors.*`, so a bare
+copy of just the connectors folder failed with `ModuleNotFoundError: No
+module named 'ai_sdlc'` outside that exact package structure — confirmed
+by actually testing the bare-copy scenario in a venv that never had
+`ai-sdlc` installed, not assumed. Restructured to live at
+**`packages/mcp-connectors/`** instead — a fully separate, sibling
+top-level package with its own `pyproject.toml`/`README.md`/`INSTALL.md`,
+its own Python package name (`mcp_connectors`, no `ai_sdlc` prefix
+anywhere), and its own console-script names (`jira-mcp`/`confluence-mcp`/
+`sharepoint-mcp`, renamed from `ai-sdlc-mcp-*`). Still lives in this same
+repo (a monorepo-with-independent-sub-packages layout, not a separate git
+repo — that was tried first and reverted as unnecessary overhead once the
+real requirement turned out to be import/packaging independence, not
+repository independence) but Nova's own `pyproject.toml` has zero
+reference to it — no shared dependency, no shared package namespace.
+Re-verified from a completely fresh venv after the move: `pip install -e
+"packages/mcp-connectors[all,dev]"` alone (nothing else pre-installed)
+passes all 139 tests and resolves all three console scripts.
+
+Three **standalone MCP (Model Context Protocol) servers** exist under
+`packages/mcp-connectors/src/mcp_connectors/` — Jira, Confluence,
+SharePoint — each independently installable/runnable with **zero
+dependency on Nova at all**, not just on its orchestration machinery.
+This closes the "Jira/Confluence Enterprise Connectors are still entirely
+deferred" item under Sage's follow-up below — **partially**, see that
+item's own updated note for exactly how far, since the connectors
+existing and being wired into Nova's own agent framework are two
+different things and only the former happened this pass.
+
+Built on the official standalone `mcp` Python SDK
+(`mcp.server.fastmcp.FastMCP`, stdio transport), deliberately **not**
+`claude_agent_sdk`'s in-process `create_sdk_mcp_server` helper — that one
+can't run as its own standalone process, which is exactly why the
+approved design rejected it. Each connector ships its own console-script
+entry point (`jira-mcp`, `confluence-mcp`, `sharepoint-mcp`) and its own
+optional `pyproject.toml` extra (`jira`, `confluence`, `sharepoint`),
+mirroring the existing `copilot`/`anthropic` extras' "real integration is
+opt-in, mock/nothing is the hard default" convention — now inside
+`packages/mcp-connectors/pyproject.toml`, its own independent dependency
+surface, not Nova's root `pyproject.toml`.
+
+- [x] **Shared scaffolding** (`mcp_connectors/common.py`): one `Document`
+      result model (`id`/`title`/`snippet`/`source`/`url`/
+      `last_modified`/`container`/`metadata`) every connector's
+      `search`/`fetch` tools return; a self-contained `ConnectorError`
+      hierarchy (`ConnectorConfigError`/`ConnectorAuthError`/
+      `ConnectorAPIError`) that deliberately does **not** reuse
+      `ai_sdlc.capabilities`' `ProviderError`/`MalformedResponseError`,
+      per the approved design's "must work with zero dependency on the
+      rest of this codebase" requirement; `enforce_allowlist`, the
+      config-time half of the precision requirement, shared by all
+      three; and real `keyring`-backed credential storage
+      (`store_secret`/`get_secret`/`delete_secret`/`CredentialRef`) — a
+      connector's JSON config file only ever holds a `(service,
+      username)` reference, never a raw secret.
+- [x] **Self-contained MCP tool-error contract, verified against the
+      installed package, not assumed**: read `mcp==1.29.0`'s own source
+      (`mcp/server/lowlevel/server.py::Server.call_tool`,
+      `mcp/server/fastmcp/tools/base.py::Tool.run`) to confirm any
+      exception raised inside a `@server.tool()` function is already
+      converted into a real `CallToolResult(isError=True, ...)` MCP
+      response — no bespoke translation layer needed at that boundary.
+      Proven end to end, not just read about:
+      `packages/mcp-connectors/tests/test_servers.py::
+      test_allowlist_violation_becomes_a_real_mcp_tool_error` drives the
+      actual low-level protocol handler and asserts `isError is True`
+      with the raised exception's message in the response content.
+- [x] **The precision requirement, enforced in two places for all three
+      connectors, per the approved design**:
+      1. Config-time hard allowlist (`allowed_projects`/`allowed_spaces`/
+         `sites`) — naming anything outside it raises
+         `ConnectorConfigError` before any request is built, verified by
+         tests that assert the injected fake HTTP client is never even
+         called for a disallowed container.
+      2. Query-time native scope filter — Jira JQL `project in (KEY1,
+         KEY2) AND text ~ "..."`, Confluence CQL `space in
+         ("KEY1","KEY2") AND text ~ "..."`, SharePoint Graph Search
+         `Path:"<site url>"` clauses (Online) / `_api/search/query`
+         `Path:"<site url>*"` clauses (Server on-prem) — never "fetch
+         broadly, then filter client-side." Even each connector's
+         `fetch(id)` goes through this same scoped-query mechanism
+         rather than a raw unscoped by-id GET, **with one flagged
+         exception**: SharePoint Online's `fetch()` calls Graph's direct
+         `GET /drives/{id}/items/{id}` (Graph Search's `queryString` has
+         no reliable "match this exact item id" clause the way JQL/CQL
+         do), so scope is verified *after* that fetch instead
+         (`_verify_item_in_scope`) — documented explicitly in
+         `online_client.py`'s docstring as the one deliberate departure
+         from "always query-scoped," with the structural reason why, not
+         silently glossed over.
+- [x] **Jira & Confluence share an Atlassian HTTP client module**
+      (`mcp_connectors/atlassian/auth.py`) even though they ship as
+      separate MCP server processes — one `AtlassianSiteConfig` model,
+      one `build_auth_headers` covering all three approved auth methods
+      (`cloud_api_token` — Cloud, Basic email+token;
+      `data_center_pat` — Data Center 8.14+/7.9+, Bearer;
+      `data_center_basic` — older Data Center, Basic username+password),
+      cross-validated at config-load time (e.g. `cloud_api_token` against
+      `deployment_type: data_center` is rejected immediately, not
+      discovered later as a confusing auth failure).
+- [x] **A real, live-docs-verified deviation from the approved design,
+      flagged rather than silently absorbed**: the brief states Jira/
+      Confluence's project/space scoping syntax is identical across
+      Cloud and Data Center so query-construction logic doesn't need to
+      fork, only base URL/auth do. True for Confluence. **Not fully true
+      for Jira**: live web research (2026-08-16) found Atlassian fully
+      removed Jira Cloud's classic `GET/POST /rest/api/{2,3}/search`
+      bulk-search endpoints between May–October 2025, migrating Cloud to
+      a new endpoint, `POST /rest/api/3/search/jql`
+      (`nextPageToken`-paginated). This is a Cloud-only backend-scaling
+      migration — Data Center is unaffected and still runs classic
+      `POST /rest/api/2/search` (`startAt`-paginated). So Jira's
+      `search()`/`fetch()` *do* fork on deployment type for which
+      endpoint carries the request (`jira/client.py::_search_request`)
+      — the allowlist-scoped JQL string itself is still built by one
+      shared, unforked function (`build_jql`). Documented in detail in
+      `jira/client.py`'s module docstring, including the sources
+      checked. A second, smaller consequence of the same Cloud
+      migration: `/rest/api/3/search/jql` is a `v3` endpoint, and Jira
+      `v3` issue `fields.description` is Atlassian Document Format (a
+      nested JSON node tree), not the plain string `v2`/Data Center
+      returns — `jira/client.py::_extract_description_text` walks both
+      shapes defensively (best-effort ADF text extraction, not a full
+      renderer).
+- [x] **SharePoint: both backends built, per the explicit instruction
+      not to defer either.**
+      - **Online** (`sharepoint/online_client.py`): Microsoft Graph
+        Search API (`POST /search/query`, `entityTypes: ["driveItem"]`),
+        Azure AD app-registration client-credentials OAuth2 (headless,
+        no interactive user — this is a server process), in-memory
+        token caching with an expiry margin. `Path:"..."` KQL clauses
+        for site scoping, verified via live web search against
+        Microsoft Learn's own Graph Search examples.
+      - **Server on-prem** (`sharepoint/onprem_client.py`): classic
+        `_api/search/query` REST — genuinely no Graph involvement at
+        all, confirmed structurally (Graph has no on-prem auth
+        equivalent). NTLM auth via `requests_ntlm.HttpNtlmAuth`
+        (installed and directly inspected in this environment:
+        `requests-ntlm==1.3.0`, a real working dependency, added as
+        `pyproject.toml`'s new `sharepoint` extra's `requests`/
+        `requests-ntlm` entries — `requests`, not `httpx`, since NTLM
+        support integrates with `requests` far more commonly in the
+        Python ecosystem) or Basic auth (ADFS-fronted/basic-auth-enabled
+        deployments). **Kerberos explicitly not implemented** — needs
+        system Kerberos ticket infrastructure and native-extension
+        packages (`requests-kerberos`/`pykerberos`/`gssapi`) that
+        commonly fail to build without system headers present, and there
+        was no domain-joined environment to verify it against even if
+        built. Flagged as a real, scoped-out gap, not guessed at.
+      - Selected per configured site via an explicit, required
+        `deployment_type: "online" | "server"` field (a Pydantic
+        discriminated union, `SharePointOnlineSiteConfig` |
+        `SharePointServerSiteConfig`) — **never auto-detected from the
+        URL**, exactly as specified (vanity Online domains and hybrid
+        ADFS-joined Server deployments make that unreliable). Built and
+        tested Online first, then Server, per the specified sequencing.
+      - `sharepoint/client.py`'s `SharePointClient` facade dispatches to
+        whichever backend a site declares and enforces the site
+        allowlist (SharePoint's allowlist unit is the configured site
+        itself — see that module's docstring for why that differs from
+        Jira/Confluence's "one site, many allowlisted projects/spaces"
+        shape). Document ids are composed as `"<site_url>::<backend
+        id>"` at the facade boundary (never inside either backend) since
+        `fetch(id)` alone has no other way to know which of potentially
+        several configured sites/backends an opaque id belongs to.
+- [x] **A real bug found and fixed during development, not just in
+      review**: `onprem_client.py`'s `fetch()` originally tried to reuse
+      `build_onprem_kql`'s site-scoping clause via string-slicing
+      (`build_onprem_kql("*", [site_url])[1:]`) spliced onto an exact-path
+      clause — produced a KQL string with mismatched parentheses
+      (`'Path:"..." AND *) AND (Path:"...")'`). Caught by a smoke test
+      run against the real client logic before any pytest test was even
+      written, not by a human reviewer; fixed by composing the two
+      clauses directly instead of splicing strings.
+- [x] **A second real bug, a genuine breaking upstream dependency change,
+      found only by actually installing the package into a disposable
+      venv** (this codebase's established "verify against real installs"
+      practice, not just reading docs): the `mcp` PyPI package shipped
+      a breaking `2.0.0` release, current as of this writing, that
+      removes/relocates the high-level `FastMCP` server class every
+      connector's `mcp_server.py` imports
+      (`mcp.server.fastmcp.FastMCP` doesn't exist under that path in
+      2.0.0 — renamed/restructured to `mcp.server.mcpserver.MCPServer`,
+      an unrelated API this codebase has not been ported to). The
+      original unconstrained `mcp>=1.2.0` floor in `pyproject.toml`
+      would have silently resolved to 2.0.0 on a fresh install and
+      failed to import. Fixed with an explicit `<2.0.0` upper bound on
+      all three extras, documented in `pyproject.toml`'s own comment.
+      Every connector here was built and tested against the installed
+      `mcp==1.29.0` specifically; porting to `mcp>=2.0.0` is a real,
+      scoped-out follow-up.
+- [x] **Result capping**: `DEFAULT_RESULT_LIMIT = 15`,
+      `MAX_RESULT_LIMIT = 50` (`common.py`) — every connector's config
+      has a `result_limit` field (`Field(ge=1, le=MAX_RESULT_LIMIT)`,
+      config-validation error if exceeded, never a silent clamp).
+- [x] **Tests**: 139 new tests across eight files
+      (`tests/test_mcp_connectors_{common,atlassian_auth,jira,
+      confluence,sharepoint_online,sharepoint_onprem,sharepoint_client,
+      servers}.py`) — full suite went from 397 passed/3 skipped to 536
+      passed/3 skipped, zero regressions. Every HTTP-touching test uses
+      an injected fake (`httpx.MockTransport` for Jira/Confluence/
+      SharePoint Online, a hand-rolled fake `requests.Session`-shaped
+      object for SharePoint Server) exercising real request-construction
+      logic (real JQL/CQL/KQL/Graph-query strings, real header
+      construction) — never a hand-wave over "and then it calls the
+      API." Credential tests monkeypatch the module-level `keyring`
+      reference rather than touching a real OS keychain during test runs.
+
+**No live credentials anywhere in this environment** — none of the three
+connectors were exercised against a real, credentialed Jira/Confluence/
+SharePoint tenant. Every client module's docstring says explicitly what
+was verified against current, live-fetched API documentation (Jira/
+Confluence/Graph Search endpoints — see the deviation notes above) versus
+what's carried over from general documentation familiarity without a
+fresh live-docs check this session (flagged honestly:
+`onprem_client.py`'s classic Search REST JSON response shape, the one
+place in this pass that wasn't independently re-verified against live
+docs — treat it as needing the most scrutiny in a live-verification
+follow-up). Response parsing is defensive throughout (`dict.get`/
+`getattr` with fallbacks), mirroring `capabilities/providers/
+claude_sdk.py`'s established stance for the same situation.
+
+**Explicitly deferred, not started, matching the approved design's scope
+boundary**:
+
+- [ ] **Phase 2 (Sage-style aggregator + agent-framework wiring)** —
+      nothing in this pass touches `RetrievalCapability`, the
+      orchestrator, or any specialist agent. A future pass would need to
+      decide how (or whether) an agent fans a query out across all three
+      connectors, how a workspace configures which connectors are
+      active, and whether that goes through the existing
+      `AI_SDLC_AGENT_FRAMEWORK` selection or something connector-specific.
+      None of those questions were answered or even opened here.
+- [ ] Kerberos auth for SharePoint Server (see above).
+- [ ] Porting to `mcp>=2.0.0` (see above).
+- [ ] No credential-provisioning CLI/wizard — an operator runs
+      `store_secret(...)` by hand (documented in each connector's
+      `config.py` docstring) or calls `keyring.set_password` directly.
+      Reasonable for this pass's scope; a real onboarding flow would
+      probably want one.
+- [ ] No pagination beyond the first page for any connector — every
+      `search()` call is a single top-N request (`result_limit`), by
+      design (a "sensible default result limit, not unbounded" per the
+      approved design), but there's no way to page further into a larger
+      result set from the MCP tool interface itself if a caller wanted
+      to.
+
 ## Sage — follow-up (RetrievalCapability's *codebase-grounding* portion now built differently — see below)
 
 - [x] ~~`RetrievalCapability` is entirely deferred — no stub exists yet in
@@ -520,10 +773,20 @@ PR (see the still-open item above).
       not abandoned — pick it up if the harnessed-agent approach proves too slow
       or expensive at real repo scale (no concrete trigger threshold defined yet,
       §20 open question 10).
-- [ ] **Jira/Confluence Enterprise Connectors are still entirely deferred**,
-      unaffected by the above — a harnessed coding-agent tool has no native
-      Jira/Confluence awareness, so this gap isn't closed by PR #18 at all.
-      Still Sage's (or Nexus-MCP-adapter) job, still not started.
+- [ ] ~~**Jira/Confluence Enterprise Connectors are still entirely
+      deferred**~~ **Partially resolved** (branch
+      `agents/nexus-knowledge-base-connectors`, see the new "Nexus —
+      Knowledge Base Tool Connectors, Phase 1" section above): Jira and
+      Confluence (plus SharePoint, not originally listed here but part
+      of the same approved initiative) now exist as real, standalone MCP
+      servers with hard scope enforcement and real JQL/CQL/Graph-query
+      construction. **Still true, and still exactly this bullet's
+      original point**: none of this is reachable through
+      `RetrievalCapability`, the orchestrator, or any specialist agent —
+      a harnessed coding-agent tool still has no native Jira/Confluence/
+      SharePoint awareness, on purpose (explicitly out of scope for
+      Phase 1). That wiring is Phase 2, still Sage's (or a
+      Nexus-MCP-adapter's) job, still not started.
 - [x] ~~**Architecture Agent's retrieval call is wired but not reachable in a
       live workflow yet**~~ **Resolved** (branch `agents/forge-developer-agent`,
       found as a side effect of wiring the Developer Agent, which needed the
