@@ -25,6 +25,18 @@ Test hooks (documented, not a hidden hack):
     - Either can also be passed per-call via `complete(..., force_error=...)`,
       which takes precedence over the constructor-level setting for that
       one call.
+    - `MockReasoningProvider(trigger_needs_context=True)` makes every
+      `complete()` call against a schema that declares `needs_context`/
+      `context_query` (PO/Architecture/UX -- see `agents/*/schemas.py`)
+      deterministically request context instead of the normal rule-based
+      derivation, so the full Orchestrator -> memory -> Sage -> resume
+      loop (`orchestration/orchestrator.py`) can be exercised without a
+      real LLM. Also available per-call via
+      `complete(..., trigger_needs_context=True)`. Distinct from
+      `needs_clarification`'s existing test path -- there is no
+      cheap-heuristic pre-LLM gate for `needs_context` (see
+      `SpecialistAgent.execute()`'s docstring), so this is the only way to
+      exercise it deterministically.
 """
 from __future__ import annotations
 
@@ -117,12 +129,13 @@ def _match_any(sentence: str, keywords: tuple) -> bool:
 
 
 class MockReasoningProvider(ReasoningCapability):
-    def __init__(self, force_error: Optional[str] = None):
+    def __init__(self, force_error: Optional[str] = None, trigger_needs_context: bool = False):
         if force_error not in _VALID_FORCE_ERRORS:
             raise ValueError(
                 f"Unsupported force_error={force_error!r}; expected one of {_VALID_FORCE_ERRORS}"
             )
         self.force_error = force_error
+        self.trigger_needs_context = bool(trigger_needs_context)
 
     def complete(
         self,
@@ -130,17 +143,28 @@ class MockReasoningProvider(ReasoningCapability):
         *,
         output_schema: Type[SchemaT],
         force_error: Optional[str] = None,
+        trigger_needs_context: Optional[bool] = None,
     ) -> SchemaT:
         effective = force_error if force_error is not None else self.force_error
         if effective not in _VALID_FORCE_ERRORS:
             raise ValueError(
                 f"Unsupported force_error={effective!r}; expected one of {_VALID_FORCE_ERRORS}"
             )
+        effective_needs_context = (
+            trigger_needs_context if trigger_needs_context is not None else self.trigger_needs_context
+        )
 
         if effective == "provider_failure":
             raise ProviderError("mock_provider: simulated provider/network failure")
 
         payload = self._derive_payload(prompt, output_schema)
+
+        if effective_needs_context and "needs_context" in output_schema.model_fields:
+            payload["needs_context"] = True
+            payload["context_query"] = (
+                "What does the existing project documentation say about this requirement?"
+            )
+            payload["needs_clarification"] = False
 
         if effective == "malformed":
             payload = self._malform(payload, output_schema)
@@ -160,15 +184,18 @@ class MockReasoningProvider(ReasoningCapability):
         for name, field in output_schema.model_fields.items():
             annotation = field.annotation
             origin = get_origin(annotation)
-            if name == "clarification_question":
-                # Optional[str], paired with `needs_clarification` (see
-                # `_bool_value`) -- the mock never asks the LLM-driven
-                # clarification question (that's deliberately not something
-                # a keyword-rule mock can honestly simulate), so this is
-                # always unused/None. Handled by name before the type-based
-                # dispatch below since `Optional[str]` would otherwise fall
-                # into the generic `_str_value` branch and get populated
-                # with unused placeholder text.
+            if name in ("clarification_question", "context_query"):
+                # Optional[str], paired with `needs_clarification`/
+                # `needs_context` respectively (see `_bool_value`) -- the
+                # mock never asks the LLM-driven clarification/context
+                # question (that's deliberately not something a
+                # keyword-rule mock can honestly simulate), so this is
+                # always unused/None here. `complete()` overrides
+                # `context_query` directly when `trigger_needs_context` is
+                # in effect. Handled by name before the type-based dispatch
+                # below since `Optional[str]` would otherwise fall into the
+                # generic `_str_value` branch and get populated with unused
+                # placeholder text.
                 payload[name] = None
             elif origin in (list, List):
                 payload[name] = self._list_value(name, sentences)
@@ -207,14 +234,17 @@ class MockReasoningProvider(ReasoningCapability):
         for a real model's judgment about ambiguity -- the pre-LLM
         `check_needs_clarification()` heuristic gate (see each agent's
         `*_agent.py`) is what mock-backed tests exercise for clarification
-        behavior instead. Any other bool field defaults to True (currently
-        only `requires_ui`, Architecture Agent -- assume a UI is needed
-        unless a clear no-UI signal is found in the input, matching the
-        schema's own conservative default) since it's the only other bool
-        field that exists today.
+        behavior instead. `needs_context` is likewise always False here for
+        the same reason -- `complete()`'s `trigger_needs_context` hook is
+        what mock-backed tests exercise for that behavior instead, since
+        there's no cheap pre-LLM heuristic for it at all. Any other bool
+        field defaults to True (currently only `requires_ui`, Architecture
+        Agent -- assume a UI is needed unless a clear no-UI signal is found
+        in the input, matching the schema's own conservative default)
+        since it's the only other bool field that exists today.
         """
         lname = name.lower()
-        if "needs_clarification" in lname:
+        if "needs_clarification" in lname or "needs_context" in lname:
             return False
         if "requires_ui" not in lname:
             return True

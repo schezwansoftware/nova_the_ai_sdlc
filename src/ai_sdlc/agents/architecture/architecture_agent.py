@@ -82,7 +82,11 @@ class ArchitectureAgent(SpecialistAgent):
         inputs: Dict[str, Any] = request.inputs or {}
         requirements: Dict[str, Any] = inputs.get("requirements") or {}
         codebase_context = self._gather_codebase_context(inputs, requirements)
-        return build_architecture_prompt(requirements, codebase_context=codebase_context)
+        return build_architecture_prompt(
+            requirements,
+            codebase_context=codebase_context,
+            sage_context=inputs.get("sage_context"),
+        )
 
     def _gather_codebase_context(
         self, inputs: Dict[str, Any], requirements: Dict[str, Any]

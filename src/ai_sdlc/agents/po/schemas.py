@@ -46,6 +46,25 @@ class POAgentOutputData(BaseModel):
         default=None,
         description="Required, non-empty, when `needs_clarification` is true; otherwise unused.",
     )
+    needs_context: bool = Field(
+        default=False,
+        description=(
+            "True only if you are missing specific factual information that "
+            "likely already exists in an internal knowledge source (a Jira "
+            "ticket, a Confluence page, existing project documentation) -- "
+            "not a product/business decision only a human can make (use "
+            "`needs_clarification` for that instead). When true, set "
+            "`context_query` to one specific, plain-language question "
+            "describing exactly what you need to know, and the other fields "
+            "may be left empty/minimal; they are not used. At most one of "
+            "`needs_clarification`/`needs_context` may be true. Default to "
+            "false."
+        ),
+    )
+    context_query: Optional[str] = Field(
+        default=None,
+        description="Required, non-empty, when `needs_context` is true; otherwise unused.",
+    )
     feature_title: str
     summary: str
     functional_requirements: List[str]
@@ -55,12 +74,24 @@ class POAgentOutputData(BaseModel):
 
     @staticmethod
     def _skip_nonempty(info: ValidationInfo) -> bool:
-        return bool(info.data.get("needs_clarification"))
+        return bool(info.data.get("needs_clarification") or info.data.get("needs_context"))
 
     @model_validator(mode="after")
     def _clarification_question_required_when_needed(self) -> "POAgentOutputData":
         if self.needs_clarification and not (self.clarification_question or "").strip():
             raise ValueError("clarification_question must not be empty when needs_clarification is true")
+        return self
+
+    @model_validator(mode="after")
+    def _context_query_required_when_needed(self) -> "POAgentOutputData":
+        if self.needs_context and not (self.context_query or "").strip():
+            raise ValueError("context_query must not be empty when needs_context is true")
+        return self
+
+    @model_validator(mode="after")
+    def _needs_clarification_and_needs_context_mutually_exclusive(self) -> "POAgentOutputData":
+        if self.needs_clarification and self.needs_context:
+            raise ValueError("at most one of needs_clarification/needs_context may be true")
         return self
 
     @field_validator("feature_title", "summary")

@@ -739,17 +739,17 @@ claude_sdk.py`'s established stance for the same situation.
 **Explicitly deferred, not started, matching the approved design's scope
 boundary**:
 
-- [ ] **Phase 2 (Sage-style aggregator + agent-framework wiring)** —
+- [x] **Phase 2 (Sage-style aggregator + agent-framework wiring)** —
       nothing in this pass touches `RetrievalCapability`, the
       orchestrator, or any specialist agent.
-      **Design now fully locked (2026-08-16), zero code written** — see
-      "Sage — Phase 2 Knowledge Consumption Design" below for the complete
-      design (superseded the "aggregator" framing entirely: Sage runs an
-      isolated sub-session per question instead of pre-fetching/merging
-      across connectors). All of the open questions this bullet
+      **Design locked 2026-08-16, implemented 2026-08-17** — see
+      "Sage — Phase 2 Knowledge Consumption" below for the complete,
+      now-built design (superseded the "aggregator" framing entirely: Sage
+      runs an isolated sub-session per question instead of pre-fetching/
+      merging across connectors). All of the open questions this bullet
       originally raised (how an agent reaches connectors, how a workspace
       configures which are active, whether it shares
-      `AI_SDLC_AGENT_FRAMEWORK`) are answered there.
+      `AI_SDLC_AGENT_FRAMEWORK`) are answered and implemented there.
 - [ ] Kerberos auth for SharePoint Server (see above).
 - [ ] Porting to `mcp>=2.0.0` (see above).
 - [ ] No credential-provisioning CLI/wizard — an operator runs
@@ -764,17 +764,47 @@ boundary**:
       result set from the MCP tool interface itself if a caller wanted
       to.
 
-## Sage — Phase 2 Knowledge Consumption Design (approved design, 2026-08-16 — zero implementation yet)
+## Sage — Phase 2 Knowledge Consumption (this pass, branch `agents/sage-phase2-context-wiring`) — IMPLEMENTED 2026-08-17
 
-Full design brainstorm for how Nova's own specialist agents (PO/Architecture/
-UX/Developer) actually consume the 5 MCP connectors shipped above. Explicitly
-design-only, matching how the connectors themselves were designed-then-built
-in two separate passes. Nothing below is implemented — this section exists so
-whoever picks this up next has the complete, already-thought-through design
-rather than starting from the open questions the two Nexus sections above
-originally left behind.
+The design locked below (2026-08-16) is now built, end to end, exactly as
+designed — no deviation from the shape, only two upgrades to what was
+originally flagged as unverified (see "Verified, not guessed" at the end of
+this section). New: `capabilities/sage.py` (`SageRequest`/`SageResponse`/
+`SageCapability`/`SageMemoryEntry`/`normalize_context_query`),
+`capabilities/connector_resolver.py` (`ConnectorResolver`, framework-agnostic,
+zero SDK imports), `capabilities/providers/{sage_mock,sage_claude,sage_copilot,
+sage_factory}.py`. Modified: `agents/base.py` (`AgentStatus.NEEDS_CONTEXT`,
+`AgentResult.context_query`), `agents/{po,architecture,ux}/schemas.py`
+(`needs_context`/`context_query` fields + mutual-exclusivity validator against
+`needs_clarification`), `agents/{po,architecture,ux}/prompts.py` (`sage_context`
+rendering + `OUTPUT_STRUCTURE` teaching the model when to use which flag),
+`agents/framework.py`/`agents/ux/ux_agent.py` (detection), `capabilities/
+providers/mock.py` (`MockReasoningProvider(trigger_needs_context=True)` test
+hook), `orchestration/state.py` (`sage_memory.json` read/write),
+`orchestration/orchestrator.py` (the actual NEEDS_CONTEXT handling loop —
+by far the largest single change, ~230 lines in `invoke_agent_for_stage`),
+`cli/bootstrap.py`/`cli/handlers.py` (`connectors.json` scaffolding + the
+`ai-sdlc init` checklist prompt). 103 new tests across 8 new + 2 extended
+test files, all passing (full suite: 500 passed / 4 skipped, zero
+regressions against the pre-existing 397). Verified against the actually-
+installed `claude-agent-sdk==0.2.139`/`github-copilot-sdk==1.0.9` in this
+environment (`/opt/anaconda3/bin/python3`), not docs-only assumption — see
+"Verified, not guessed" below.
 
-- [ ] **Sage runs each question in its own isolated sub-session — not a
+**Two scope decisions made explicitly by the user before this pass started**
+(the design below left both open): (1) both Claude and Copilot get a real
+`SageCapability` provider in this pass, not Claude-only/mock-only; (2) PO,
+Architecture, and UX get `needs_context` — Developer Agent does not (its
+output comes from `CodingCapability`, not a `ReasoningCapability`-validated
+schema with a `needs_clarification`-shaped field to mirror; wiring it in
+would need a separate mechanism, left as a flagged follow-up below).
+
+Full original design brainstorm for how Nova's own specialist agents actually
+consume the 5 MCP connectors shipped above — preserved below with each bullet
+marked `[x]` and annotated with what actually shipped, since the design
+survived implementation unchanged in every load-bearing respect:
+
+- [x] **Sage runs each question in its own isolated sub-session — not a
       pre-fetch aggregator, and not shared tools on the calling agent.**
       Rejected two other shapes first: (1) a Sage aggregator that fans a
       query out to every connector, merges/dedups/ranks before the agent
@@ -796,7 +826,14 @@ originally left behind.
       *only inside that sub-session*. Only the final distilled, cited
       answer crosses back — never the raw tool-call transcript — keeping
       the calling agent's own context window untouched by search noise.
-- [ ] **Tool wiring must be framework-agnostic, not Claude-only.** One
+      **Implemented as designed**: `SageCapability.ask()`
+      (`capabilities/sage.py`) is the only entry point; `SageClaudeProvider`/
+      `SageCopilotProvider` each drive their own bounded session (mirroring
+      `retrieval_claude.py`/`reasoning_copilot.py`'s existing patterns).
+      `Orchestrator` (`orchestration/orchestrator.py`) is the *only* caller —
+      PO/Architecture/UX never import anything Sage-related; they only ever
+      set `needs_context`/`context_query` on their own structured output.
+- [x] **Tool wiring must be framework-agnostic, not Claude-only.** One
       shared, provider-agnostic resolver (new small module, plain data, no
       SDK imports) turns "this workspace's enabled connectors" into MCP
       server specs + resulting tool names; each framework's provider
@@ -808,8 +845,17 @@ originally left behind.
       adapter, never re-solving "which connectors, what config."
       **Not yet verified**: whether Copilot's SDK exposes an allowlist step
       the same way Claude's does — check the installed SDK before assuming
-      symmetry.
-- [ ] **New per-project connector-enablement config**, e.g.
+      symmetry. **Now verified** — see "Verified, not guessed" below;
+      Copilot's mechanism turned out *more* granular than Claude's, not less.
+      **Implemented as designed**: `ConnectorResolver.resolve()`
+      (`capabilities/connector_resolver.py`) reads `connectors.json` and
+      returns plain-data `ConnectorLaunchSpec`s with zero SDK imports;
+      `SageClaudeProvider` maps a spec to `McpStdioServerConfig` +
+      `mcp__<name>__<tool>` allowed-tools strings, `SageCopilotProvider` maps
+      the same spec to `MCPStdioServerConfig` with its own per-server
+      `tools:` field — each provider's mapping is the only framework-specific
+      code; `connectors.json`'s shape and parsing exist exactly once.
+- [x] **New per-project connector-enablement config**, e.g.
       `.ai-sdlc/connectors.json` — deliberately separate from `CLIConfig`
       and from `AI_SDLC_AGENT_FRAMEWORK` (different questions: which LLM
       runs Nova's own agents vs. which knowledge sources Sage can reach).
@@ -824,7 +870,24 @@ originally left behind.
       init. A connector enabled but never properly configured is **skipped
       quietly** when Sage tries to use it (not a hard error), with the skip
       itself noted in the visible log below.
-- [ ] **Orion mediates via the already-shipped `needs_clarification`
+      **Implemented as designed**: `.ai-sdlc/connectors.json`
+      (`schema_version: "connectors-v1"`, one entry per known connector name
+      with `enabled`/`command`/`args`/`env`), scaffolded by
+      `cli/bootstrap.py::write_connectors_config` (idempotent/
+      non-destructive, same convention as `write_agent_metadata`) and
+      declared via a new `questionary.checkbox` multi-select prompt
+      (`cli/handlers.py::_resolve_connectors_interactively` — the first
+      multi-select interaction in this CLI, every prior prompt was
+      single-select) wired into `run_init` right after agent-metadata
+      scaffolding. `command` is never auto-derived (Nova can't know where an
+      operator installed the independent `packages/mcp-connectors`); an
+      enabled-but-unconfigured connector is skipped quietly by
+      `ConnectorResolver`, never a hard error, exactly as specified.
+      Cancelling just the connectors checklist (Ctrl-C) is deliberately
+      **non-fatal** to the rest of `init` — a judgment call beyond what the
+      design doc specified, justified by "declare now, configure later"
+      already treating zero connectors as a normal, expected state.
+- [x] **Orion mediates via the already-shipped `needs_clarification`
       pattern, generalized — not a live tool inside reasoning.** Reuses the
       exact schema mechanism from PR #31 (`needs_clarification`/
       `clarification_question`), generalized to a second flag (e.g.
@@ -845,7 +908,25 @@ originally left behind.
       routing knowledge lives inside Sage alone, reaffirmed explicitly
       after considering (and rejecting) having the caller hint at which
       connector is relevant.
-- [ ] **Full, structured, visible logging — for humans now and Sentinel
+      **Implemented as designed, with one real simplification found during
+      implementation**: `Orchestrator.invoke_agent_for_stage`
+      (`orchestration/orchestrator.py`) checks `StateStore.read_sage_memory()`
+      first, calls `self.sage.ask(...)` only on a miss, then re-invokes the
+      same agent with the answer merged into `inputs["sage_context"]` —
+      structurally the *clarification*-resume shape (re-invoke), not the
+      *approval*-resume shape (reuse stored data), since PO/Architecture/UX
+      haven't done real expensive work yet when they ask. **The
+      simplification**: because this resolves entirely synchronously within
+      one `invoke_agent_for_stage` call, it needs **no persisted
+      `pending_context` record at all** — unlike `pending_clarification`/
+      `pending_approval`, which exist specifically because those flows must
+      survive a separate HTTP round-trip. `wf.status` never leaves `RUNNING`.
+      A separate `context_rounds` counter/`max_context_rounds = 3` budget
+      (never touching `attempts`/`wf.retry_count`, since a context round is
+      not a failure) bounds a worker that keeps asking; exceeding it once
+      lets the worker proceed with a caveat, exceeding it *again* fails the
+      workflow (`needs_context_loop_exceeded`) as a genuine bug signal.
+- [x] **Full, structured, visible logging — for humans now and Sentinel
       later.** Explicit user requirement: every state change must be
       visible, not silent, even though this flow never blocks waiting for a
       human. Every step (worker's request → memory check result → Sage
@@ -859,7 +940,22 @@ originally left behind.
       display already used for "Thinking... Ns..." during real LLM calls
       should narrate this flow in real time too (e.g. "Asking Sage about
       X... 12s... Sage found an answer (source: Confluence)").
-- [ ] **Local memory, owned by Sage — no new agent.** The "keep a running
+      **Implemented, with the CLI-narration half explicitly deferred**:
+      every one of the 5 named steps (`context_requested`,
+      `context_memory_check`, `sage_invoked`/`connector_skipped`,
+      `sage_answered`/`sage_failed`, `context_resolved`) is written via
+      `StateStore.append_audit_event` into the existing `.ai-sdlc/audit/
+      events.jsonl`, following that file's established ad-hoc-dict
+      convention (no new typed schema). **Live CLI narration was not
+      built**: `cli/handlers.py::_call_with_thinking` only animates one
+      blocking HTTP call from the CLI process itself — there is no
+      streaming/SSE/polling primitive between the CLI and the Core Platform
+      API server today for it to narrate what's happening *inside* a
+      server-side `invoke_agent_for_stage` call. The audit log is the
+      source of truth for after-the-fact visibility instead; real-time
+      narration is a real, scoped-out follow-up (would need new
+      streaming infrastructure, not a small addition).
+- [x] **Local memory, owned by Sage — no new agent.** The "keep a running
       memory of what's been learned" job belongs to Sage (already owns
       "Knowledge/RAG... context engineering" per the ownership table), not
       a new team member. Written immediately the moment Sage successfully
@@ -875,7 +971,20 @@ originally left behind.
       everything it ever returns; older entries are treated as *possibly
       stale*, not permanent truth, since a cached Jira/Confluence answer
       can go stale after the source changes.
-- [ ] **Five follow-up decisions, all approved:**
+      **Implemented as designed**: `StateStore.read_sage_memory`/
+      `write_sage_memory_entry` (`orchestration/state.py`) — one JSON
+      object at `.ai-sdlc/sage_memory.json` (not one-file-per-entry the way
+      clarifications/approvals are, since a single small file *is* the
+      "cheap plain lookup," and read-modify-write happens under one
+      `_locked(exclusive=True)` block). Keyed by `normalize_context_query()`
+      (`capabilities/sage.py`) — whitespace-collapsed, lowercased,
+      exact-match only, deliberately not fuzzy/semantic. Only `found=True`
+      answers are ever written; a miss is never cached (caching "nothing
+      found" would block a later, differently-configured connector set from
+      ever being retried for the same query). No TTL/staleness enforcement
+      — `saved_at` is exposed as data for the worker's own prompt to weigh,
+      not an enforced expiry.
+- [x] **Five follow-up decisions, all approved:**
       1. **Safety of retrieved content** — relies on connectors already
          being **read-only by construction** (none can write/delete) as the
          primary, already-true mitigation. The deeper "sanitize retrieved
@@ -905,11 +1014,93 @@ originally left behind.
          later shows one framework is meaningfully better at tool-use/
          search tasks specifically.
 
-**Still genuinely open, not part of this design pass**: what Sentinel (the
-eval/QA agent, also still fully unbuilt) actually *does* with these logs once
-they exist. The shared-resolver module, the `connectors.json` shape, the
-`needs_context` schema field, and Sage's own capability/provider code are all
-unbuilt — this whole section is design, not a changelog entry.
+**Verified, not guessed** — both `claude-agent-sdk==0.2.139` and
+`github-copilot-sdk==1.0.9` are actually installed in this environment
+(`/opt/anaconda3/bin/python3`, confirmed via `pip show`), letting every MCP
+wiring claim below be checked against real installed types rather than docs:
+
+- `ClaudeAgentOptions.mcp_servers: dict[str, McpStdioServerConfig | ...] |
+  str | Path` and `ClaudeAgentOptions.cwd: str | Path | None = None` (both
+  confirmed via `inspect.signature`) — resolves `packages/mcp-connectors/
+  INSTALL.md` §3b from "a real, scoped, currently-unbuilt follow-up" to
+  verified-buildable; `McpStdioServerConfig`'s `TypedDict` shape
+  (`type`/`command`/`args`/`env`) matches `ConnectorLaunchSpec` field-for-
+  field.
+- `CopilotClient.create_session(...)` genuinely accepts `mcp_servers:
+  dict[str, MCPServerConfig] | None`; `MCPStdioServerConfig` has a
+  **per-server** `tools: list[str]` field ("`[]` means none, `'*'` means
+  all", per the SDK's own source comment) — **more granular than Claude's
+  one flat session-wide `allowed_tools`**, resolving this section's one
+  explicitly-flagged unknown ("not yet verified: whether Copilot's SDK
+  exposes an allowlist step the same way Claude's does") in Sage's favor,
+  not against it. `PermissionRequestMcp` (`copilot.generated.session_events`)
+  is real, carrying `kind="mcp"`/`server_name`/`tool_name`/`read_only`,
+  confirming `coding_copilot.py`'s pre-existing `_KIND_TO_TOOL_NAMES["mcp"]
+  = ("Mcp",)` mapping was accurate.
+- **One genuinely new, still-unresolved unknown** (not present in the
+  original design): whether Copilot's `available_tools=[]` (the mechanism
+  `reasoning_copilot.py` uses for its own structural zero-tool guarantee)
+  would *also* suppress `mcp_servers`-derived tools, or only non-MCP
+  builtin tools — not determinable from the installed package's Python-side
+  types alone (the resolution logic is server-side in the Copilot CLI
+  binary). `SageCopilotProvider` takes the conservative path: leaves
+  `available_tools`/`excluded_tools` unset and relies on the
+  `on_permission_request` handler (approve every `kind=="mcp"` call, reject
+  everything else) as the primary scoping mechanism instead of layering an
+  unverified allowlist on top.
+
+**Explicitly deferred / out of scope this pass** (flagged, not attempted):
+
+- [ ] **Developer Agent's `needs_context`** — per the user's own scope
+      decision for this pass. `DeveloperAgent` subclasses `Agent` directly,
+      not `SpecialistAgent`, and its output comes from `CodingCapability`,
+      not a `ReasoningCapability`-validated schema — there's no
+      `needs_clarification`-shaped field to attach a sibling flag to
+      without a larger redesign.
+- [ ] **Live CLI real-time narration** of the Sage sub-flow ("Asking Sage
+      about X... found via Confluence") — see the logging bullet above for
+      why (no streaming/SSE/polling primitive between the CLI and the Core
+      Platform API server exists today).
+- [ ] **Memory staleness/TTL enforcement** — entries carry `saved_at` but
+      nothing expires them automatically.
+- [ ] **Fuzzy/semantic memory-key matching**, **a `connectors.json`
+      enable/disable CLI command**, **duplicating a connector's own
+      fine-grained scoping into `connectors.json`** — all explicitly ruled
+      out by the locked design for V1, still true.
+- [ ] **Sanitizing retrieved connector content against embedded
+      prompt-injection payloads** — pre-existing Aegis gap (see follow-up
+      decision #1 above), not solved here, not made worse.
+- [ ] **Tightening Copilot's MCP permission handler beyond "approve every
+      `kind=='mcp'` call"** — `PermissionRequestMcp` carries `read_only`,
+      so a future pass could gate more precisely (e.g. only auto-approve
+      read-only tool calls); V1 trusts the connectors' read-only-by-
+      construction guarantee uniformly.
+- [ ] **A real, pre-existing, unrelated bug found and flagged while
+      touching `build_prompt` for `sage_context` threading, not fixed
+      here**: `ArchitectureAgent.build_prompt()`/`UXAgent.build_prompt()`
+      never surface `inputs["clarification_answer"]` on a
+      clarification-resume today — only `POAgent._effective_text` does
+      this correctly (see that fix, above, in the Craft PO Agent section).
+      A real Architecture/UX clarification round-trip currently discards
+      the user's answer and re-reasons over an unchanged prompt. Worth its
+      own follow-up ticket.
+- [ ] **No live, credentialed end-to-end verification** — no live Jira/
+      Confluence/SharePoint/Local Docs/OneDrive credentials, and no
+      authenticated Claude/Copilot session, exist in this environment.
+      Every new provider is verified against injected fakes (mirroring
+      every other provider in this codebase's existing test convention)
+      plus, for the SDK wiring itself, direct introspection of the real
+      installed packages (see "Verified, not guessed" above) — never a
+      real `mcp_servers`-driven tool call end to end. A follow-up pass with
+      real credentials and a real workspace's `.ai-sdlc/connectors.json`
+      pointed at an actually-installed `packages/mcp-connectors` venv would
+      be the natural next verification step.
+
+**No longer open**: what Sentinel (the eval/QA agent, still fully unbuilt)
+actually *does* with these logs once they exist — that remains unaddressed,
+but the logs themselves now exist and are real, structured data (see the
+audit-logging bullet above), not a hypothetical for Sentinel's eventual
+consumption to be designed around later.
 
 ## Nexus — Local Directories & OneDrive Connectors, Phase 1 (cont'd) (this pass, branch `agents/nexus-local-onedrive-connectors`)
 

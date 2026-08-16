@@ -10,6 +10,12 @@ class AgentStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     NEEDS_CLARIFICATION = "needs_clarification"
+    # Distinct from NEEDS_CLARIFICATION: this is auto-resolved by Sage
+    # inline (see Orchestrator.invoke_agent_for_stage), never paused for a
+    # human, and never surfaced as a workflow-visible status -- see
+    # AgentResult.context_query below and orchestration/api.py's
+    # WorkflowStatusType, which has no corresponding value.
+    NEEDS_CONTEXT = "needs_context"
     NEEDS_APPROVAL = "needs_approval"
     BLOCKED = "blocked"
     FAILED = "failed"
@@ -47,6 +53,13 @@ class AgentResult(BaseModel):
     findings: Optional[list] = []
     questions: Optional[list] = []
     warnings: Optional[list] = []
+    # Set only alongside status=NEEDS_CONTEXT, carrying the worker's
+    # plain-language question for Sage (see AgentStatus.NEEDS_CONTEXT).
+    # Kept separate from `questions` -- that field is specifically the
+    # human-facing clarification channel; overloading it would make an
+    # audit-log reader unable to tell a Sage-directed question from a
+    # human-directed one without also inspecting `status`.
+    context_query: Optional[str] = None
     # Additive field (not present in the original Atlas contract as
     # implemented): structured payload produced by a specialist agent
     # (e.g. a POAgentOutputData/ArchitectureOutputData dump). Agents are

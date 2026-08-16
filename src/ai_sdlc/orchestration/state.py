@@ -103,6 +103,15 @@ class StateStore:
         self.clarifications_dir = self.state_dir / "clarifications"
         self.clarifications_dir.mkdir(parents=True, exist_ok=True)
 
+        # Sage's local memory (see capabilities/sage.py's module
+        # docstring): one JSON object keyed by normalized context query,
+        # not one-file-per-entry like clarifications_dir/approvals_dir --
+        # a cheap plain lookup over a single small file is exactly the
+        # "not a search index" shape the locked design calls for, and a
+        # single file means read_sage_memory()'s common-case lookup is
+        # one read, not a directory listing.
+        self.sage_memory_path = self.state_dir / "sage_memory.json"
+
         # In-process mutex guarding compound read-modify-write sequences.
         # This is scoped to this StateStore instance, which is sufficient
         # because the platform HTTP server (ThreadedHTTPServer) runs a
@@ -251,3 +260,38 @@ class StateStore:
             if not path.exists():
                 return None
             return json.loads(path.read_text(encoding="utf-8"))
+
+    def read_sage_memory(self) -> Dict[str, Any]:
+        """Return the full Sage memory map (normalized query -> entry
+        dict). Callers look up a specific key themselves -- there is no
+        separate single-key read method, since the whole file is small
+        enough that reading it whole is exactly the "cheap plain lookup"
+        the locked design calls for."""
+        with self._locked(exclusive=False):
+            if not self.sage_memory_path.exists():
+                return {}
+            try:
+                return json.loads(self.sage_memory_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                # A corrupted memory file is the same as an empty one from
+                # the caller's perspective -- never a hard failure over a
+                # cache that exists purely to save a Sage call.
+                return {}
+
+    def write_sage_memory_entry(self, key: str, entry: Dict[str, Any]) -> None:
+        """Read-modify-write a single entry into the Sage memory map under
+        one `_locked(exclusive=True)` block -- safe against concurrent
+        `StateStore` calls the same way every other single-file write in
+        this class is. Doesn't need the heavier `transaction()` mutex
+        (that one spans a load-mutate-save sequence across *multiple*
+        `_locked()` calls); this is one atomic call."""
+        with self._locked(exclusive=True):
+            if self.sage_memory_path.exists():
+                try:
+                    current = json.loads(self.sage_memory_path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    current = {}
+            else:
+                current = {}
+            current[key] = entry
+            self._atomic_write_json(self.sage_memory_path, current)

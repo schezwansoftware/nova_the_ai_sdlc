@@ -1,4 +1,5 @@
-"""Tests for `ai_sdlc.cli.bootstrap.spawn_server`'s `env` threading.
+"""Tests for `ai_sdlc.cli.bootstrap.spawn_server`'s `env` threading, and
+`write_connectors_config`'s `.ai-sdlc/connectors.json` scaffolding.
 
 `subprocess.Popen` is monkeypatched rather than actually spawning a
 process -- these tests only need to prove *what gets passed* to `Popen`,
@@ -11,6 +12,7 @@ No network access / external credentials required.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -66,3 +68,61 @@ def test_spawn_server_command_line_unaffected_by_env(fake_popen, tmp_path: Path)
     assert "ai_sdlc.platform.server" in args
     assert str(tmp_path) in args
     assert "--port" in args and "8123" in args
+
+
+# -- write_connectors_config -------------------------------------------------------
+
+
+def test_write_connectors_config_declares_all_known_connectors(tmp_path: Path) -> None:
+    path = bootstrap.write_connectors_config(tmp_path, ["jira", "confluence"])
+
+    assert path == str(tmp_path / ".ai-sdlc" / "connectors.json")
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "connectors-v1"
+    names = {c["name"] for c in payload["connectors"]}
+    assert names == set(bootstrap.KNOWN_CONNECTOR_NAMES)
+
+
+def test_write_connectors_config_marks_only_selected_names_enabled(tmp_path: Path) -> None:
+    path = bootstrap.write_connectors_config(tmp_path, ["jira", "local_docs"])
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+
+    enabled = {c["name"] for c in payload["connectors"] if c["enabled"]}
+    disabled = {c["name"] for c in payload["connectors"] if not c["enabled"]}
+    assert enabled == {"jira", "local_docs"}
+    assert disabled == set(bootstrap.KNOWN_CONNECTOR_NAMES) - enabled
+
+
+def test_write_connectors_config_never_guesses_a_command(tmp_path: Path) -> None:
+    path = bootstrap.write_connectors_config(tmp_path, ["jira"])
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+
+    for connector in payload["connectors"]:
+        assert connector["command"] is None
+        assert connector["args"] == []
+        assert connector["env"] == {}
+
+
+def test_write_connectors_config_with_empty_selection_still_declares_all_disabled(tmp_path: Path) -> None:
+    path = bootstrap.write_connectors_config(tmp_path, [])
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+
+    assert all(not c["enabled"] for c in payload["connectors"])
+
+
+def test_write_connectors_config_is_idempotent_and_non_destructive(tmp_path: Path) -> None:
+    first_path = bootstrap.write_connectors_config(tmp_path, ["jira"])
+    assert first_path is not None
+
+    # Hand-edit the file, as an operator would after filling in a real
+    # command -- re-running must leave it alone.
+    config_path = Path(first_path)
+    hand_edited = json.loads(config_path.read_text(encoding="utf-8"))
+    hand_edited["connectors"][0]["command"] = "/usr/local/bin/jira-mcp"
+    config_path.write_text(json.dumps(hand_edited), encoding="utf-8")
+
+    second_call = bootstrap.write_connectors_config(tmp_path, ["confluence"])
+
+    assert second_call is None
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    assert payload["connectors"][0]["command"] == "/usr/local/bin/jira-mcp"

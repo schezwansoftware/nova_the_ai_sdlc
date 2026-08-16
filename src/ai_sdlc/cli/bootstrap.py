@@ -1,6 +1,6 @@
 """Local workspace bootstrap for `ai-sdlc init`.
 
-Two independent concerns live here:
+Three independent concerns live here:
 
 1. `write_agent_metadata` -- scaffolds `<workspace>/.ai-sdlc/agents/*.json`
    registry metadata for the shipped specialist agents. `AgentRegistry`
@@ -11,7 +11,16 @@ Two independent concerns live here:
    configuration for the target workspace, not workflow *state*; the CLI
    never reads it back, and it doesn't shortcut any orchestration decision
    the way reading `.ai-sdlc/workflow.json` directly would.
-2. `spawn_server` -- starts the standalone Core Platform API process via
+2. `write_connectors_config` -- scaffolds
+   `<workspace>/.ai-sdlc/connectors.json`, the per-project declaration of
+   which of Sage's 5 MCP connectors (`packages/mcp-connectors/`) are
+   enabled -- read by `capabilities/connector_resolver.py::
+   ConnectorResolver` (via `Orchestrator.sage`, never by the CLI itself).
+   Same idempotent/non-destructive posture as `write_agent_metadata` for
+   the same reason: a hand-edited file (e.g. one an operator has since
+   filled in with real `command`/`env` values) must survive a re-run of
+   `init`.
+3. `spawn_server` -- starts the standalone Core Platform API process via
    `python -m ai_sdlc.platform.server`, i.e. shelling out to the same
    public entrypoint documented in that module's own `__main__` block. The
    CLI process itself never imports `ai_sdlc.platform.server` or anything
@@ -91,6 +100,47 @@ def write_agent_metadata(workspace: Path) -> List[str]:
         path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
         written.append(str(path))
     return written
+
+
+#: Must match `capabilities/connector_resolver.py::KNOWN_CONNECTOR_NAMES`
+#: exactly -- duplicated here rather than imported so the CLI package
+#: (per its own module docstring, see `client.py`/`handlers.py`) never
+#: imports anything under `ai_sdlc.capabilities`/`ai_sdlc.orchestration`,
+#: matching its existing "talks to Core's HTTP API exclusively" discipline
+#: (the one exception, `bootstrap.spawn_server`, shells out to a
+#: subprocess rather than importing).
+KNOWN_CONNECTOR_NAMES = ("jira", "confluence", "sharepoint", "local_docs", "onedrive")
+
+_CONNECTORS_SCHEMA_VERSION = "connectors-v1"
+
+
+def write_connectors_config(workspace: Path, enabled_names: List[str]) -> Optional[str]:
+    """Write `.ai-sdlc/connectors.json` if it doesn't already exist,
+    declaring every known connector with `enabled` set per
+    `enabled_names`. Idempotent and non-destructive -- an existing file
+    (hand-edited with real `command`/`env` values, or from a prior `init`
+    run) is left alone; returns `None` in that case. `command`/`args`/
+    `env` are always written as empty/`null` here regardless of
+    `enabled` -- per the locked design, "declare now, configure later":
+    Nova has no reliable way to know where an operator installed the
+    independent `packages/mcp-connectors` package, so this never guesses
+    a path.
+    """
+    path = workspace / ".ai-sdlc" / "connectors.json"
+    if path.exists():
+        return None
+
+    enabled_set = set(enabled_names or [])
+    payload = {
+        "schema_version": _CONNECTORS_SCHEMA_VERSION,
+        "connectors": [
+            {"name": name, "enabled": name in enabled_set, "command": None, "args": [], "env": {}}
+            for name in KNOWN_CONNECTOR_NAMES
+        ],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return str(path)
 
 
 def spawn_server(
