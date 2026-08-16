@@ -43,11 +43,21 @@ OUTPUT_STRUCTURE = """\
 Produce a structured UX design with exactly these fields:
 - needs_clarification: true only if the requirements are genuinely too
   ambiguous to design a meaningful UX flow without guessing at something
-  important. When true, set clarification_question to one specific,
-  answerable question and leave the fields below empty/minimal -- they are
-  not used. Default to false.
+  important -- a decision only a human can make. When true, set
+  clarification_question to one specific, answerable question and leave
+  the fields below empty/minimal -- they are not used. Default to false.
 - clarification_question: required, non-empty, when needs_clarification is
   true; otherwise unused.
+- needs_context: true only if you are missing specific factual information
+  that likely already exists in an internal knowledge source (a Jira
+  ticket, a Confluence page, existing project documentation) -- not a
+  decision only a human can make (use needs_clarification for that
+  instead). When true, set context_query to one specific, plain-language
+  question describing exactly what you need to know, and leave the fields
+  below empty/minimal -- they are not used. At most one of
+  needs_clarification/needs_context may be true. Default to false.
+- context_query: required, non-empty, when needs_context is true;
+  otherwise unused.
 - flow_title: a short, human-readable label for the primary user flow
 - summary: 1-2 sentence summary of the overall UX approach
 - user_flows: list of step-by-step descriptions of each key user journey
@@ -56,9 +66,36 @@ Produce a structured UX design with exactly these fields:
 """
 
 
-def build_ux_prompt(requirements: Dict[str, Any]) -> str:
+def _render_sage_context(sage_context: list | None) -> str:
+    """Render Sage-gathered context entries as their own labeled block.
+    See `orchestration/orchestrator.py`'s NEEDS_CONTEXT handling for how
+    these entries get produced."""
+    if not sage_context:
+        return ""
+    blocks = []
+    for entry in sage_context:
+        found = entry.get("found")
+        source = entry.get("source_connector") or "not found"
+        url = entry.get("source_url") or "no link"
+        blocks.append(
+            f"Q: {entry.get('query', '')}\n"
+            f"A: {entry.get('answer', '') if found else '(nothing found)'}\n"
+            f"Source: {source} ({url})"
+        )
+    joined = "\n\n".join(blocks)
+    return (
+        "Additional context gathered by Sage (may be incomplete or stale):\n"
+        f'"""\n{joined}\n"""\n'
+    )
+
+
+def build_ux_prompt(requirements: Dict[str, Any], sage_context: list | None = None) -> str:
     """Build the plain-text prompt for a single UX Agent invocation from a
     requirements dict (e.g. `POAgentOutputData.model_dump()`).
+
+    `sage_context` is the optional list of Sage-answered/memory-hit context
+    entries gathered by the Orchestrator's NEEDS_CONTEXT handling for this
+    invocation; `None`/empty for every caller/test that predates it.
     """
     lines = []
     for key, value in requirements.items():
@@ -75,4 +112,5 @@ def build_ux_prompt(requirements: Dict[str, Any]) -> str:
         f"{OUTPUT_STRUCTURE}\n"
         "Structured requirements:\n"
         f'"""\n{requirements_block}\n"""\n'
+        f"{_render_sage_context(sage_context)}"
     )

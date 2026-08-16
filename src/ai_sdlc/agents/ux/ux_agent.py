@@ -142,7 +142,7 @@ class UXAgent(SpecialistAgent):
     def build_prompt(self, request: AgentRequest) -> str:
         inputs: Dict[str, Any] = request.inputs or {}
         requirements: Dict[str, Any] = inputs.get("requirements") or {}
-        return build_ux_prompt(requirements)
+        return build_ux_prompt(requirements, sage_context=inputs.get("sage_context"))
 
     def execute(self, request: AgentRequest) -> AgentResult:
         question = self.check_needs_clarification(request)
@@ -176,6 +176,21 @@ class UXAgent(SpecialistAgent):
                 agent_id=self.agent_id,
                 status=AgentStatus.NEEDS_CLARIFICATION,
                 questions=[ux_data.clarification_question],
+            )
+
+        # Same shape as the needs_clarification branch above, but resolved
+        # automatically by Sage rather than paused for a human -- see
+        # Orchestrator.invoke_agent_for_stage's NEEDS_CONTEXT branch. Also
+        # returns before calling DesignCapability, for the same reason: a
+        # UX flow still missing context has nothing meaningful to generate
+        # visuals for yet.
+        if ux_data.needs_context:
+            return AgentResult(
+                request_id=request.request_id,
+                workflow_id=request.workflow_id,
+                agent_id=self.agent_id,
+                status=AgentStatus.NEEDS_CONTEXT,
+                context_query=ux_data.context_query,
             )
 
         inputs: Dict[str, Any] = request.inputs or {}

@@ -44,11 +44,22 @@ OUTPUT_STRUCTURE = """\
 Produce a structured requirements specification with exactly these fields:
 - needs_clarification: true only if the requirement is genuinely too
   ambiguous to produce a meaningful structured specification without
-  guessing at something important. When true, set clarification_question
-  to one specific, answerable question and leave the fields below
-  empty/minimal -- they are not used. Default to false.
+  guessing at something important -- a product/business decision only a
+  human can make. When true, set clarification_question to one specific,
+  answerable question and leave the fields below empty/minimal -- they are
+  not used. Default to false.
 - clarification_question: required, non-empty, when needs_clarification is
   true; otherwise unused.
+- needs_context: true only if you are missing specific factual information
+  that likely already exists in an internal knowledge source (a Jira
+  ticket, a Confluence page, existing project documentation) -- not a
+  decision only a human can make (use needs_clarification for that
+  instead). When true, set context_query to one specific, plain-language
+  question describing exactly what you need to know, and leave the fields
+  below empty/minimal -- they are not used. At most one of
+  needs_clarification/needs_context may be true. Default to false.
+- context_query: required, non-empty, when needs_context is true;
+  otherwise unused.
 - feature_title: a short, human-readable title for the requirement
 - summary: 1-2 sentence summary of what is being built and why
 - functional_requirements: list of concrete, testable functional requirements
@@ -58,12 +69,47 @@ Produce a structured requirements specification with exactly these fields:
 """
 
 
-def build_po_prompt(requirement_text: str, context: Dict[str, Any] | None = None) -> str:
+def _render_sage_context(sage_context: list | None) -> str:
+    """Render Sage-gathered context entries as their own labeled block,
+    kept separate from the generic `context` dict below so it never gets
+    flattened into an unreadable `str(list-of-dicts)` line. See
+    `orchestration/orchestrator.py`'s NEEDS_CONTEXT handling for how these
+    entries get produced."""
+    if not sage_context:
+        return ""
+    blocks = []
+    for entry in sage_context:
+        found = entry.get("found")
+        source = entry.get("source_connector") or "not found"
+        url = entry.get("source_url") or "no link"
+        blocks.append(
+            f"Q: {entry.get('query', '')}\n"
+            f"A: {entry.get('answer', '') if found else '(nothing found)'}\n"
+            f"Source: {source} ({url})"
+        )
+    joined = "\n\n".join(blocks)
+    return (
+        "Additional context gathered by Sage (may be incomplete or stale):\n"
+        f'"""\n{joined}\n"""\n'
+    )
+
+
+def build_po_prompt(
+    requirement_text: str,
+    context: Dict[str, Any] | None = None,
+    sage_context: list | None = None,
+) -> str:
     """Build the plain-text prompt for a single PO Agent invocation.
 
     `context` may include prior clarification answers or project metadata
     already gathered by Orion (e.g. `project_context`); it is rendered as
     plain text, never as vendor-specific structured messages.
+
+    `sage_context` is the optional list of Sage-answered/memory-hit context
+    entries gathered by the Orchestrator's NEEDS_CONTEXT handling for this
+    invocation (see `orchestration/orchestrator.py`); `None`/empty for
+    every caller/test that predates it, which produces the exact same
+    prompt as before this existed.
     """
     context = context or {}
     context_lines = "\n".join(f"- {key}: {value}" for key, value in context.items()) or "(none)"
@@ -76,4 +122,5 @@ def build_po_prompt(requirement_text: str, context: Dict[str, Any] | None = None
         f"\"\"\"\n{requirement_text}\n\"\"\"\n\n"
         "Additional context:\n"
         f"{context_lines}\n"
+        f"{_render_sage_context(sage_context)}"
     )

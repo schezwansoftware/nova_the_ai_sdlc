@@ -127,5 +127,9 @@ class POAgent(SpecialistAgent):
     def build_prompt(self, request: AgentRequest) -> str:
         inputs: Dict[str, Any] = request.inputs or {}
         text = self._effective_text(inputs)
-        context = {k: v for k, v in inputs.items() if k not in ("requirement_text", "force")}
-        return build_po_prompt(text, context=context)
+        context = {
+            k: v
+            for k, v in inputs.items()
+            if k not in ("requirement_text", "force", "sage_context")
+        }
+        return build_po_prompt(text, context=context, sage_context=inputs.get("sage_context"))

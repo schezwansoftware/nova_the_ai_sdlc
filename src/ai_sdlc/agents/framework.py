@@ -154,6 +154,18 @@ class SpecialistAgent(Agent):
                 questions=[data.clarification_question],
             )
 
+        # Same shape as the needs_clarification branch above, but resolved
+        # automatically by Sage rather than paused for a human -- see
+        # Orchestrator.invoke_agent_for_stage's NEEDS_CONTEXT branch.
+        if getattr(data, "needs_context", False):
+            return AgentResult(
+                request_id=request.request_id,
+                workflow_id=request.workflow_id,
+                agent_id=self.agent_id,
+                status=AgentStatus.NEEDS_CONTEXT,
+                context_query=data.context_query,
+            )
+
         extras = self.build_result_extras(request, data)
         return AgentResult(
             request_id=request.request_id,

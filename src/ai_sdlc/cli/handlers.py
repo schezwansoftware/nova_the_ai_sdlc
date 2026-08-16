@@ -149,6 +149,30 @@ def _resolve_agent_framework_interactively(console: Console) -> str:
     ).unsafe_ask()
 
 
+def _resolve_connectors_interactively(console: Console) -> list:
+    """Ask which of Sage's 5 knowledge connectors to enable via a
+    multi-select checklist (`questionary.checkbox`) -- the first
+    multi-select interaction pattern in this package (every prior prompt,
+    `_resolve_agent_framework_interactively`, is a single-select
+    `questionary.select`), structurally parallel to it rather than
+    reusing any shared code, since there's nothing to share beyond
+    `questionary` itself.
+
+    Uses `unsafe_ask()` for the same reason
+    `_resolve_agent_framework_interactively` does -- see that function's
+    docstring. Unlike that prompt, cancelling this one is not fatal to
+    `run_init` as a whole (see the caller): declaring zero connectors is
+    always a valid, expected state ("declare now, configure later"), so a
+    user who Ctrl-C's out of just this checklist keeps everything else
+    `init` already completed rather than losing it.
+    """
+    return questionary.checkbox(
+        "Which knowledge connectors should Sage be able to reach? "
+        "(space to toggle, enter to confirm -- none is fine, configure later)",
+        choices=list(bootstrap.KNOWN_CONNECTOR_NAMES),
+    ).unsafe_ask()
+
+
 def run_init(
     console: Console,
     workspace: Path,
@@ -189,6 +213,31 @@ def run_init(
             console.print(f"  {path}")
     else:
         console.print("[dim]Agent registry metadata already present; left untouched.[/dim]")
+
+    # Connector selection is interactive-only and non-fatal to cancel --
+    # see _resolve_connectors_interactively's docstring. Non-interactive/
+    # CI runs get an empty-by-default connectors.json (no --connectors
+    # flag exists for V1, matching the locked design's "declare now,
+    # configure later" posture -- there's nothing broken about zero
+    # connectors enabled).
+    selected_connectors: list = []
+    if _is_interactive_session():
+        try:
+            selected_connectors = _resolve_connectors_interactively(console)
+        except (KeyboardInterrupt, EOFError):
+            console.print()
+            formatters.render_warning(console, "Skipped connector selection.")
+
+    connectors_path = bootstrap.write_connectors_config(resolved_workspace, selected_connectors)
+    if connectors_path:
+        formatters.render_success(console, f"Scaffolded connectors config: {connectors_path}")
+        if selected_connectors:
+            console.print(
+                "[dim]Selected connectors are declared but not yet configured -- fill in "
+                "their command/env in .ai-sdlc/connectors.json before Sage can use them.[/dim]"
+            )
+    else:
+        console.print("[dim]Connectors config already present; left untouched.[/dim]")
 
     client = _client_for(config)
     if client.is_reachable():

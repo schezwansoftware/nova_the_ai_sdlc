@@ -1,11 +1,19 @@
 from __future__ import annotations
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
+import time
 import uuid
 from pydantic import ValidationError
 
-from ai_sdlc.orchestration.state import StateStore, WorkflowState, WorkflowStatus
+from ai_sdlc.orchestration.state import StateStore, WorkflowState, WorkflowStatus, utc_now_iso
 from ai_sdlc.agents.base import AgentRequest, AgentResult, AgentStatus
 from ai_sdlc.agents.registry import AgentRegistry
+from ai_sdlc.capabilities.providers.sage_factory import get_default_sage_provider
+from ai_sdlc.capabilities.sage import (
+    MalformedResponseError as SageMalformedResponseError,
+    ProviderError as SageProviderError,
+    SageRequest,
+    normalize_context_query,
+)
 
 
 class AgentExecutionError(Exception):
@@ -14,12 +22,33 @@ class AgentExecutionError(Exception):
         self.retryable = retryable
 
 
+#: Marker note appended to a `sage_context` entry when the per-invocation
+#: NEEDS_CONTEXT round budget (`Orchestrator.max_context_rounds`) is
+#: exhausted -- see `invoke_agent_for_stage`'s NEEDS_CONTEXT branch. Also
+#: used to detect a genuine loop bug (the worker asking again even after
+#: being told the budget is exhausted).
+_CONTEXT_BUDGET_EXHAUSTED_NOTE = "context round budget exhausted; proceed with available information"
+
+
 class Orchestrator:
     def __init__(self, workspace_path):
         self.store = StateStore(workspace_path)
         # AgentRegistry supports discovery from the workspace
         self.registry = AgentRegistry(workspace_path)
         self.max_attempts = 3
+        # Sage Phase 2 knowledge consumption (see capabilities/sage.py's
+        # module docstring): the Orchestrator is the only caller of
+        # SageCapability -- a specialist agent never touches it directly.
+        # `get_default_sage_provider` takes `workspace_path` directly
+        # (unlike the zero-arg reasoning/coding/retrieval factories) since
+        # the Orchestrator, unlike AgentRegistry._load_impl, already has
+        # the real workspace path in hand -- see sage_factory.py's
+        # docstring.
+        self.sage = get_default_sage_provider(workspace_path)
+        # Separate bound from max_attempts -- a needs_context round is not
+        # a failure and must never count against the real retry budget.
+        # Mirrors max_attempts's existing hardcoded-constant precedent.
+        self.max_context_rounds = 3
 
     def register_agent(self, agent_id: str, agent_obj: Any):
         self.registry.register(agent_id, agent_obj)
@@ -214,6 +243,11 @@ class Orchestrator:
 
         # Orchestrator owns retry loop deterministically
         attempts = wf.retry_count.get(agent_id, 0)
+        # Separate accumulator/counter for NEEDS_CONTEXT rounds -- never
+        # touches `attempts`/`wf.retry_count` (context resolution is not a
+        # failure, see the NEEDS_CONTEXT branch below).
+        context_rounds = 0
+        sage_context: List[Dict[str, Any]] = []
         while attempts < self.max_attempts:
             # make request per attempt; merge persisted wf.inputs with provided inputs so agents receive full context
             merged_inputs = {}
@@ -221,6 +255,8 @@ class Orchestrator:
                 merged_inputs.update(wf.inputs)
             if inputs:
                 merged_inputs.update(inputs)
+            if sage_context:
+                merged_inputs["sage_context"] = list(sage_context)
             request = self._make_request(wf.workflow_id, agent_id, action, merged_inputs)
             self._emit({
                 "event": "agent_started",
@@ -321,6 +357,200 @@ class Orchestrator:
                 wf.retry_count.pop(agent_id, None)
                 self.save_workflow(wf)
                 return {"status": "completed"}
+
+            if result.status == AgentStatus.NEEDS_CONTEXT:
+                # Auto-resolved by Sage inline, entirely within this call
+                # -- no persisted pending-context record, no
+                # human-visible pause (unlike NEEDS_CLARIFICATION/
+                # NEEDS_APPROVAL below, which must survive a separate
+                # HTTP round-trip). Re-invokes the same agent afterward
+                # (via `continue`), matching NEEDS_CLARIFICATION's
+                # resume shape, not NEEDS_APPROVAL's -- PO/Architecture/
+                # UX are cheap, reasoning-only, and haven't done real
+                # expensive work yet.
+                query = (result.context_query or "").strip()
+                if not query:
+                    # Malformed result: NEEDS_CONTEXT without a usable
+                    # query indicates a bug in the agent/schema, not a
+                    # normal miss -- same retryable-until-exhausted
+                    # treatment as the agent_result_invalid branch above.
+                    self._emit({
+                        "event": "agent_result_invalid",
+                        "workflow_id": wf.workflow_id,
+                        "agent_id": agent_id,
+                        "request_id": request.request_id,
+                        "error": "NEEDS_CONTEXT result missing a usable context_query",
+                    })
+                    attempts += 1
+                    wf.retry_count[agent_id] = attempts
+                    if attempts >= self.max_attempts:
+                        wf.status = WorkflowStatus.FAILED
+                        self.save_workflow(wf)
+                        self._emit({"event": "workflow_failed", "workflow_id": wf.workflow_id, "reason": "invalid_agent_output"})
+                        return {"status": "failed", "error": "invalid_agent_output", "retryable": False}
+                    self.save_workflow(wf)
+                    self._emit({"event": "agent_retry", "workflow_id": wf.workflow_id, "agent_id": agent_id, "attempt": attempts})
+                    continue
+
+                self._emit({
+                    "event": "context_requested",
+                    "workflow_id": wf.workflow_id,
+                    "agent_id": agent_id,
+                    "stage": wf.current_stage,
+                    "request_id": result.request_id,
+                    "context_query": query,
+                    "round": context_rounds,
+                })
+
+                if context_rounds >= self.max_context_rounds:
+                    self._emit({
+                        "event": "context_budget_exceeded",
+                        "workflow_id": wf.workflow_id,
+                        "agent_id": agent_id,
+                        "context_query": query,
+                        "round": context_rounds,
+                    })
+                    already_told = any(
+                        entry.get("note") == _CONTEXT_BUDGET_EXHAUSTED_NOTE for entry in sage_context
+                    )
+                    if already_told:
+                        # Asked again even after being told the budget is
+                        # exhausted -- a genuine bug (an agent ignoring
+                        # the caveat and re-asking), not a normal miss.
+                        # Fail rather than loop forever.
+                        wf.status = WorkflowStatus.FAILED
+                        self.save_workflow(wf)
+                        self._emit({"event": "workflow_failed", "workflow_id": wf.workflow_id, "reason": "needs_context_loop_exceeded"})
+                        return {"status": "failed", "details": {"reason": "needs_context_loop_exceeded"}}
+                    sage_context.append({
+                        "query": query,
+                        "answer": "",
+                        "found": False,
+                        "note": _CONTEXT_BUDGET_EXHAUSTED_NOTE,
+                    })
+                    context_rounds += 1
+                    continue
+
+                key = normalize_context_query(query)
+                memory_entry = self.store.read_sage_memory().get(key)
+                self._emit({
+                    "event": "context_memory_check",
+                    "workflow_id": wf.workflow_id,
+                    "agent_id": agent_id,
+                    "context_query": query,
+                    "memory_key": key,
+                    "hit": memory_entry is not None,
+                })
+
+                if memory_entry:
+                    sage_context.append({
+                        "query": query,
+                        "answer": memory_entry.get("answer", ""),
+                        "found": bool(memory_entry.get("found")),
+                        "source_connector": memory_entry.get("source_connector"),
+                        "source_url": memory_entry.get("source_url"),
+                        "source": "memory",
+                        "saved_at": memory_entry.get("saved_at"),
+                    })
+                    self._emit({
+                        "event": "context_resolved",
+                        "workflow_id": wf.workflow_id,
+                        "agent_id": agent_id,
+                        "context_query": query,
+                        "found": bool(memory_entry.get("found")),
+                        "source": "memory",
+                        "round": context_rounds,
+                    })
+                    context_rounds += 1
+                    continue
+
+                self._emit({
+                    "event": "sage_invoked",
+                    "workflow_id": wf.workflow_id,
+                    "agent_id": agent_id,
+                    "context_query": query,
+                })
+                started_at = time.monotonic()
+                sage_response = None
+                try:
+                    sage_response = self.sage.ask(
+                        SageRequest(query=query, requesting_agent_id=agent_id)
+                    )
+                except (SageProviderError, SageMalformedResponseError) as exc:
+                    # A Sage failure never fails the workflow -- treated
+                    # the same as Sage finding nothing (see the `else`
+                    # branch below).
+                    self._emit({
+                        "event": "sage_failed",
+                        "workflow_id": wf.workflow_id,
+                        "agent_id": agent_id,
+                        "context_query": query,
+                        "error": str(exc),
+                    })
+                duration_ms = int((time.monotonic() - started_at) * 1000)
+
+                if sage_response is not None:
+                    for skip in sage_response.metadata.get("skipped") or []:
+                        self._emit({
+                            "event": "connector_skipped",
+                            "workflow_id": wf.workflow_id,
+                            "connector_name": skip.get("name"),
+                            "reason": skip.get("reason"),
+                        })
+                    self._emit({
+                        "event": "sage_answered",
+                        "workflow_id": wf.workflow_id,
+                        "agent_id": agent_id,
+                        "context_query": query,
+                        "found": sage_response.found,
+                        "source_connector": sage_response.source_connector,
+                        "source_url": sage_response.source_url,
+                        "duration_ms": duration_ms,
+                        "steps_used": sage_response.steps_used,
+                        "terminated_reason": sage_response.terminated_reason.value,
+                    })
+                    if sage_response.found:
+                        # Only found=True answers are ever cached -- a
+                        # miss is never cached, since caching "nothing was
+                        # found" would prevent a later, differently-
+                        # configured connector set from ever being tried
+                        # again for the same query (see sage.py's
+                        # SageMemoryEntry docstring).
+                        self.store.write_sage_memory_entry(key, {
+                            "query": query,
+                            "answer": sage_response.answer,
+                            "found": True,
+                            "source_connector": sage_response.source_connector,
+                            "source_url": sage_response.source_url,
+                            "saved_at": utc_now_iso(),
+                        })
+                    sage_context.append({
+                        "query": query,
+                        "answer": sage_response.answer,
+                        "found": sage_response.found,
+                        "source_connector": sage_response.source_connector,
+                        "source_url": sage_response.source_url,
+                        "source": "sage",
+                    })
+                else:
+                    sage_context.append({
+                        "query": query,
+                        "answer": "",
+                        "found": False,
+                        "note": "Sage was unavailable; proceed with available information",
+                    })
+
+                self._emit({
+                    "event": "context_resolved",
+                    "workflow_id": wf.workflow_id,
+                    "agent_id": agent_id,
+                    "context_query": query,
+                    "found": sage_context[-1]["found"],
+                    "source": sage_context[-1].get("source", "none"),
+                    "round": context_rounds,
+                })
+                context_rounds += 1
+                continue
 
             if result.status == AgentStatus.NEEDS_CLARIFICATION or (result.questions and len(result.questions) > 0):
                 # persist clarification question(s)

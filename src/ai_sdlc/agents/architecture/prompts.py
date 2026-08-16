@@ -41,11 +41,21 @@ OUTPUT_STRUCTURE = """\
 Produce a structured architecture with exactly these fields:
 - needs_clarification: true only if the requirements are genuinely too
   ambiguous to design a meaningful architecture without guessing at
-  something important. When true, set clarification_question to one
-  specific, answerable question and leave the fields below empty/minimal
-  -- they are not used. Default to false.
+  something important -- a decision only a human can make. When true, set
+  clarification_question to one specific, answerable question and leave
+  the fields below empty/minimal -- they are not used. Default to false.
 - clarification_question: required, non-empty, when needs_clarification is
   true; otherwise unused.
+- needs_context: true only if you are missing specific factual information
+  that likely already exists in an internal knowledge source (a Jira
+  ticket, a Confluence page, existing project documentation) -- not a
+  decision only a human can make (use needs_clarification for that
+  instead). When true, set context_query to one specific, plain-language
+  question describing exactly what you need to know, and leave the fields
+  below empty/minimal -- they are not used. At most one of
+  needs_clarification/needs_context may be true. Default to false.
+- context_query: required, non-empty, when needs_context is true;
+  otherwise unused.
 - tech_stack: list of target technologies/frameworks/datastores to use
 - component_changes: list of component-level changes required (what needs to be created/modified)
 - decisions: list of key architectural decisions made
@@ -62,8 +72,35 @@ Produce a structured architecture with exactly these fields:
 """
 
 
+def _render_sage_context(sage_context: Optional[list]) -> str:
+    """Render Sage-gathered context entries as their own labeled block,
+    kept separate from `codebase_context` (a different capability --
+    `RetrievalCapability` grounding vs. Sage's external-connector
+    grounding). See `orchestration/orchestrator.py`'s NEEDS_CONTEXT
+    handling for how these entries get produced."""
+    if not sage_context:
+        return ""
+    blocks = []
+    for entry in sage_context:
+        found = entry.get("found")
+        source = entry.get("source_connector") or "not found"
+        url = entry.get("source_url") or "no link"
+        blocks.append(
+            f"Q: {entry.get('query', '')}\n"
+            f"A: {entry.get('answer', '') if found else '(nothing found)'}\n"
+            f"Source: {source} ({url})"
+        )
+    joined = "\n\n".join(blocks)
+    return (
+        "Additional context gathered by Sage (may be incomplete or stale):\n"
+        f'"""\n{joined}\n"""\n'
+    )
+
+
 def build_architecture_prompt(
-    requirements: Dict[str, Any], codebase_context: Optional[str] = None
+    requirements: Dict[str, Any],
+    codebase_context: Optional[str] = None,
+    sage_context: Optional[list] = None,
 ) -> str:
     """Build the plain-text prompt for a single Architecture Agent
     invocation from a requirements dict (e.g. `POAgentOutputData.model_dump()`).
@@ -74,6 +111,10 @@ def build_architecture_prompt(
     `None` when no real repository path was supplied for this invocation,
     which is true for every caller/test that predates this parameter, so
     omitting it produces the exact same prompt as before this existed.
+
+    `sage_context` is the optional list of Sage-answered/memory-hit context
+    entries gathered by the Orchestrator's NEEDS_CONTEXT handling for this
+    invocation; `None`/empty for every caller/test that predates it.
     """
     lines = []
     for key, value in requirements.items():
@@ -98,4 +139,5 @@ def build_architecture_prompt(
         "Structured requirements:\n"
         f'"""\n{requirements_block}\n"""\n'
         f"{codebase_section}"
+        f"{_render_sage_context(sage_context)}"
     )
