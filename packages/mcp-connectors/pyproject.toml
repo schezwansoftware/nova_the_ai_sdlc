@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mcp-connectors"
 version = "0.1.0"
-description = "Standalone MCP servers for Jira, Confluence, and SharePoint -- precise, project/space/site-scoped search and fetch, usable with any MCP-compatible client."
+description = "Standalone MCP servers for Jira, Confluence, SharePoint, local directories, and OneDrive -- precise, scoped search and fetch, usable with any MCP-compatible client."
 requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.0",
@@ -25,6 +25,12 @@ sharepoint = [
     "requests>=2.31",
     "requests-ntlm>=1.2",
 ]
+# local_docs/onedrive are pure local-filesystem connectors -- no
+# credential, no keyring, no HTTP client, no network call at all (see
+# mcp_connectors/local_fs/search.py's module docstring). `mcp` (for
+# FastMCP) is the only real dependency beyond stdlib `pathlib`/`os`.
+local-docs = ["mcp>=1.2.0,<2.0.0"]
+onedrive = ["mcp>=1.2.0,<2.0.0"]
 all = [
     "mcp>=1.2.0,<2.0.0",
     "keyring>=24.0",
@@ -38,6 +44,8 @@ dev = ["pytest>=7.0"]
 jira-mcp = "mcp_connectors.jira.mcp_server:main"
 confluence-mcp = "mcp_connectors.confluence.mcp_server:main"
 sharepoint-mcp = "mcp_connectors.sharepoint.mcp_server:main"
+local-docs-mcp = "mcp_connectors.local_docs.mcp_server:main"
+onedrive-mcp = "mcp_connectors.onedrive.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

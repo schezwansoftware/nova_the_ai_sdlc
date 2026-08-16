@@ -761,6 +761,223 @@ boundary**:
       result set from the MCP tool interface itself if a caller wanted
       to.
 
+## Nexus — Local Directories & OneDrive Connectors, Phase 1 (cont'd) (this pass, branch `agents/nexus-local-onedrive-connectors`)
+
+Two more standalone MCP servers added to `packages/mcp-connectors/` --
+**`local-docs-mcp`** (arbitrary local directories) and **`onedrive-mcp`**
+(a OneDrive desktop client's already-synced local folder) -- alongside the
+existing Jira/Confluence/SharePoint three. Built directly inside the
+existing `packages/mcp-connectors/` package from the start (not nested
+under `src/ai_sdlc/` and then moved, learning from that earlier
+Jira/Confluence/SharePoint pass's own correction -- see the "Nexus —
+Knowledge Base Tool Connectors, Phase 1" section above); every new import
+is `from mcp_connectors.X import Y`, zero `ai_sdlc` references, matching
+the existing three connectors exactly.
+
+- [x] **Both connectors are pure local-filesystem access -- no cloud API,
+      no OAuth client, no credential, no keyring, no network call of any
+      kind.** OneDrive reads the OneDrive desktop client's already-synced
+      local folder directly off disk rather than calling Microsoft Graph
+      -- an explicit, deliberate design choice by the project owner
+      specifically to avoid the Azure AD OAuth complexity the existing
+      SharePoint Online connector needed (`sharepoint/online_client.py`'s
+      client-credentials OAuth2 flow). Not built here, on purpose, not a
+      shortcut taken under time pressure.
+- [x] **One shared local-filesystem module, two thin connectors on top**
+      -- mirrors how Jira/Confluence already share `atlassian/auth.py`.
+      `mcp_connectors/local_fs/search.py` holds the actual
+      directory-walk/text-search/path-safety logic; `local_docs/` and
+      `onedrive/` are each the usual `config.py`/`client.py`/
+      `mcp_server.py` shape on top of it, with their own console-script
+      entry points (`local-docs-mcp`, `onedrive-mcp`) and their own
+      `pyproject.toml` extras (`local-docs`, `onedrive` -- each just
+      `mcp>=1.2.0,<2.0.0`, no `keyring`/`httpx`/`requests` at all, since
+      neither needs an HTTP client or auth library). Both extras added to
+      `all` too.
+- [x] **The precision requirement, adapted for local files -- this was the
+      most important part, and the part with real security teeth**:
+      1. **Config-time hard allowlist of directories**
+         (`allowed_directories` on each connector's config model) --
+         every configured directory is resolved via `Path.resolve(
+         strict=True)` in a `pydantic` `field_validator` at config-load
+         time; a typo'd or not-yet-existing directory fails config
+         loading immediately with a clear error, never discovered later
+         as a confusing "found nothing" search result. Reuses
+         `common.py`'s existing `enforce_allowlist` at query time for the
+         allowlist-subset check (`search(query, directories=[...])`),
+         exactly like Jira/Confluence use it for project/space keys --
+         no reinvention there.
+      2. **Query-time path-safety enforcement -- genuinely new logic,
+         written and tested here for the first time in this package**
+         (`local_fs/search.py::_real_path_within_allowlist`/
+         `require_within_allowlist`): before any file's content is read
+         or returned, its *real*, symlink-followed path
+         (`Path.resolve()`) is checked to actually be `relative_to` one
+         of the allowlisted (already-resolved) directories -- never a
+         bare prefix-string check, which a symlink or a `..` sequence
+         can defeat. A path resolving outside every allowed directory is
+         never read: `search()`'s directory walk drops it silently (a
+         bad symlink somewhere in a big tree shouldn't abort an
+         otherwise-good search), `fetch()` raises `ConnectorAPIError`
+         instead (a caller-supplied id deserves a loud, explicit
+         refusal).
+      3. **Actually tested against a real symlink and a real
+         path-traversal id, not just asserted in prose** --
+         `tests/test_local_fs.py::test_symlink_escaping_allowed_directory_
+         is_excluded_from_search` and `..._is_rejected_on_fetch` construct
+         a real symlink inside an allowed `tmp_path` directory pointing at
+         a real file outside it, and confirm neither `search()` nor
+         `fetch()` ever surfaces the target's content.
+         `test_fetch_rejects_path_traversal_id_that_resolves_outside_
+         allowlist` and `test_fetch_rejects_traversal_style_id_even_when_
+         target_does_not_exist` do the same for a `"../../etc/passwd"`-style
+         `fetch()` id (both against a synthetic tmp-path traversal target
+         and literally against `"../../etc/passwd"` itself, which is
+         rejected whether or not that path happens to exist/be readable on
+         the machine running the tests). `tests/test_onedrive.py::
+         test_fetch_rejects_symlink_escaping_allowlist` re-proves the same
+         guarantee through the connector's own client, not just the shared
+         module directly.
+- [x] **No indexing/sync infrastructure** -- live search at query time
+      only: walk the allowlisted directories, read matching files, plain
+      case-insensitive substring match over content. No persistent search
+      index, matching this package's established "no indexing pipeline in
+      V1" philosophy.
+- [x] **V1 file-type scope: plain text only, and this is a documented gap,
+      not a silent one** -- `.md`, `.markdown`, `.txt`, `.rst`
+      (`local_fs/search.py::PLAIN_TEXT_EXTENSIONS`). PDF/Word (`.docx`)/
+      Excel (`.xlsx`)/image formats are **explicitly out of scope for
+      V1** -- not attempted, not silently ignored: documented at length
+      in `local_fs/search.py`'s module docstring, in both connectors'
+      `mcp_server.py` tool instructions text (so an MCP client sees it
+      too, not just source readers), in `README.md`/`INSTALL.md`, and
+      here. A `.pdf`/`.docx` file sitting in an allowlisted directory
+      simply never reaches the read/search path (extension filter in
+      `iter_candidate_files`) and is tested explicitly (`tests/
+      test_local_docs.py::test_pdf_files_are_never_returned_by_search`).
+- [x] **OneDrive's local sync folder path is explicit required config,
+      never auto-detected** -- real sync-folder locations vary too much
+      across OS/OneDrive-client-version/account-type to guess reliably
+      (macOS: typically `~/Library/CloudStorage/OneDrive-<AccountName>/`
+      for current versions, `~/OneDrive` for older ones; Windows:
+      `%USERPROFILE%\OneDrive` or `%USERPROFILE%\OneDrive - <Org Name>`
+      for business accounts; multiple accounts can exist side by side).
+      `onedrive/config.py` documents all of this and requires the
+      operator to supply the real, already-synced path(s) themselves --
+      same `allowed_directories` field name as `local_docs`, deliberately
+      not differentiated, since structurally the two connectors really
+      are the same thing pointed at different folders. Both connectors'
+      `config.py`/`client.py`/`mcp_server.py` are near-identical for
+      exactly this reason -- the one genuine structural difference is
+      `detect_cloud_placeholders=True` (OneDrive) vs. `False`
+      (`local_docs`), see next item.
+- [x] **OneDrive Files-On-Demand cloud-only placeholders -- detected on a
+      real, explicitly partial, honestly-documented best-effort basis, not
+      claimed as fully solved**
+      (`local_fs/search.py::looks_like_cloud_only_placeholder`):
+        - **What's checked**: on Windows, `os.stat().st_file_attributes`
+          (a real attribute that only exists on Windows `stat` results)
+          for `FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS` (`0x00400000`) or
+          `FILE_ATTRIBUTE_OFFLINE` (`0x00001000`) -- real, documented
+          Win32 bits OneDrive sets on an un-hydrated cloud-only
+          placeholder. On any platform, a zero-byte file with a
+          plain-text extension is treated as a suspected placeholder (a
+          genuinely empty synced document is possible but unusual, so
+          this errs toward flagging rather than silently returning empty
+          content as if it were confirmed-real).
+        - **What's explicitly *not* checked, flagged rather than glossed
+          over**: macOS implements Files-On-Demand via Apple's File
+          Provider extension, and real download status lives behind
+          `NSMetadataItemUbiquitousItemDownloadingStatusKey` -- reachable
+          from Cocoa/Foundation, not from Python's stdlib `os`/`pathlib`
+          at all. Properly detecting it would need a native bridge (e.g.
+          `pyobjc`), deliberately not taken on as a dependency for a
+          stdlib-only V1. A non-zero-byte macOS cloud-only placeholder
+          (uncommon but possible) will not be caught. No first-party
+          Linux OneDrive client exists, so the framing barely applies
+          there.
+        - **Where it fires**: `search()` skips a detected placeholder
+          silently (it has no real searchable text anyway); `fetch()`
+          raises a clear `ConnectorAPIError` naming the file and
+          explaining it looks undownloaded, instead of returning empty or
+          partial content pretending to be real. `local_docs` never opts
+          into this check at all (`detect_cloud_placeholders=False`) --
+          a genuinely empty `.txt`/`.md` file in a plain local directory
+          is normal and shouldn't be treated as suspicious; only
+          `onedrive`'s client passes `True`.
+        - **Verification honesty**: unit tests exercise this against a
+          synthetic zero-byte file standing in for a real placeholder
+          (no real OneDrive account/Files-On-Demand session was available
+          to produce an actual one) and, for the Windows attribute check,
+          against a monkeypatched `stat()` result
+          (`tests/test_local_fs.py::
+          test_looks_like_cloud_only_placeholder_checks_windows_attributes`,
+          skipped on non-Windows since the attribute doesn't exist there
+          at all) -- no Windows machine was available to verify the real
+          attribute bits against a real OneDrive-managed file. Both gaps
+          stated plainly, not implied to be covered.
+- [x] **Real, live end-to-end verification, not just unit tests** -- a
+      real MCP stdio client (the same `mcp` SDK pattern documented in
+      `INSTALL.md` section 3a) was actually run against a real
+      `local-docs-mcp` subprocess, a real config file, and a real
+      directory/file on disk this session: `list_tools()` returned
+      `['search', 'fetch']`; a real `search` call found and returned real
+      file content; naming a directory outside the configured allowlist
+      came back as `isError: True` with the allowlist-violation message;
+      a `fetch` call with id `"../../etc/passwd"` came back as
+      `isError: True` with the path-safety rejection message -- proving
+      both halves of the precision requirement hold at the real MCP
+      protocol boundary, not merely in a unit test calling Python
+      functions directly. See `INSTALL.md`'s "What's still unverified"
+      section for the full transcript-level account.
+- [x] **Tests**: 57 new tests (`tests/test_local_fs.py`,
+      `tests/test_local_docs.py`, `tests/test_onedrive.py`, plus Local
+      Docs/OneDrive sections added to the existing `tests/test_servers.py`)
+      -- package's own suite went from 139 passed to **195 passed, 1
+      skipped** (the 1 skip is the Windows-only file-attribute test,
+      skipped on this non-Windows machine by design, not a failure),
+      zero regressions. Covers: config validation/round-trip (directory
+      resolution, dedupe-by-real-path, non-empty allowlist, result-limit
+      bounds), search/fetch happy paths against real `tmp_path`
+      directories (no injected fake transport needed -- neither connector
+      makes a network call to fake), the symlink-escape and
+      path-traversal rejection tests described above, PDF-extension
+      exclusion, and the cloud-placeholder skip/flag behavior including
+      the `local_docs` vs. `onedrive` differentiation.
+- [x] **Nova's own top-level test suite reconfirmed unaffected, not just
+      assumed** -- ran from a completely separate venv
+      (`pip install -e ".[anthropic,copilot]"` + `pytest` from the repo
+      root): **397 passed, 3 skipped**, identical to the baseline already
+      on record after the earlier Jira/Confluence/SharePoint pass's
+      restructuring to `packages/mcp-connectors/` as a fully independent
+      sibling package (root `pyproject.toml`'s own `testpaths = ["tests"]`
+      already excludes `packages/mcp-connectors/` from Nova's own pytest
+      discovery, by design -- see that file's comment).
+
+**Explicitly deferred, not started, matching this pass's scope boundary**:
+
+- [ ] **No Sage-style aggregator or `RetrievalCapability`/agent-framework
+      wiring for these two connectors either** -- exactly the same
+      unstarted Phase 2 gap the original three connectors have (see the
+      updated Sage follow-up bullet below). Nothing in this pass touches
+      `RetrievalCapability`, the orchestrator, or any specialist agent.
+- [ ] PDF/`.docx`/`.xlsx`/image file support (see above -- a real,
+      deliberately deferred V1 gap, not an oversight).
+- [ ] Full OneDrive Files-On-Demand detection on macOS (needs a native
+      `pyobjc`-style bridge to Apple's File Provider API -- see above) and
+      real-Windows/real-OneDrive-account verification of the attribute
+      check and the placeholder detection generally (both currently only
+      unit-tested against synthetic stand-ins).
+- [ ] No pagination beyond the first page of results for either
+      connector, same "single top-N `result_limit` request" design as the
+      other three connectors.
+- [ ] No de-duplication of a symlink and its real target both appearing
+      as separate search results when both happen to be reachable inside
+      an allowlisted directory (this is expected, documented behavior --
+      see `tests/test_local_fs.py::test_symlink_within_allowlist_is_fine`
+      -- not a bug, but worth noting as a minor "could be nicer" item if
+      it ever becomes an actual annoyance in practice).
+
 ## Sage — follow-up (RetrievalCapability's *codebase-grounding* portion now built differently — see below)
 
 - [x] ~~`RetrievalCapability` is entirely deferred — no stub exists yet in
@@ -786,7 +1003,14 @@ boundary**:
       a harnessed coding-agent tool still has no native Jira/Confluence/
       SharePoint awareness, on purpose (explicitly out of scope for
       Phase 1). That wiring is Phase 2, still Sage's (or a
-      Nexus-MCP-adapter's) job, still not started.
+      Nexus-MCP-adapter's) job, still not started. **Two more Phase 1
+      connectors landed in a later pass** (branch
+      `agents/nexus-local-onedrive-connectors`, see "Nexus — Local
+      Directories & OneDrive Connectors, Phase 1 (cont'd)" below): Local
+      Docs and OneDrive, both pure local-filesystem, no credential. Same
+      "still not reachable through `RetrievalCapability`/the
+      orchestrator/any specialist agent" caveat applies to these two as
+      well — that wiring is still the same unstarted Phase 2.
 - [x] ~~**Architecture Agent's retrieval call is wired but not reachable in a
       live workflow yet**~~ **Resolved** (branch `agents/forge-developer-agent`,
       found as a side effect of wiring the Developer Agent, which needed the

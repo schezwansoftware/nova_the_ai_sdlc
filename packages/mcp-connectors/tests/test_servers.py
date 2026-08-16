@@ -244,3 +244,133 @@ def test_sharepoint_server_main_exits_cleanly_when_config_missing(monkeypatch, t
     assert excinfo.value.code == 1
     captured = capsys.readouterr()
     assert "sharepoint-mcp" in captured.err
+
+
+# -- Local Docs -------------------------------------------------------------------
+
+
+class _FakeLocalDocsClient:
+    def __init__(self):
+        self.search_calls = []
+        self.fetch_calls = []
+
+    def search(self, query, directories=None):
+        self.search_calls.append((query, directories))
+        if directories and "/etc" in directories:
+            raise ConnectorConfigError("directory(s) ['/etc'] are not in this connector's configured allowlist")
+        return [Document(id="/allowed/readme.md", title="readme.md", source="local_docs", container="/allowed")]
+
+    def fetch(self, id):
+        self.fetch_calls.append(id)
+        return Document(id=id, title="readme.md", source="local_docs", container="/allowed")
+
+
+def _local_docs_config(tmp_path):
+    from mcp_connectors.local_docs.config import LocalDocsConnectorConfig
+
+    allowed = tmp_path / "docs"
+    allowed.mkdir()
+    return LocalDocsConnectorConfig(allowed_directories=[str(allowed)], result_limit=10)
+
+
+def test_local_docs_server_registers_search_and_fetch_tools(tmp_path):
+    from mcp_connectors.local_docs.mcp_server import build_server
+
+    server = build_server(_local_docs_config(tmp_path), client=_FakeLocalDocsClient())
+    tools = asyncio.run(server.list_tools())
+    assert {t.name for t in tools} == {"search", "fetch"}
+
+
+def test_local_docs_server_search_happy_path(tmp_path):
+    from mcp_connectors.local_docs.mcp_server import build_server
+
+    fake = _FakeLocalDocsClient()
+    server = build_server(_local_docs_config(tmp_path), client=fake)
+    content, structured = asyncio.run(server.call_tool("search", {"query": "hello"}))
+    assert structured["result"][0]["title"] == "readme.md"
+    assert fake.search_calls == [("hello", None)]
+
+
+def test_local_docs_server_fetch_happy_path(tmp_path):
+    from mcp_connectors.local_docs.mcp_server import build_server
+
+    fake = _FakeLocalDocsClient()
+    server = build_server(_local_docs_config(tmp_path), client=fake)
+    content, structured = asyncio.run(server.call_tool("fetch", {"id": "/allowed/readme.md"}))
+    assert structured["id"] == "/allowed/readme.md"
+    assert fake.fetch_calls == ["/allowed/readme.md"]
+
+
+def test_local_docs_server_search_allowlist_violation_raises_tool_error(tmp_path):
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    from mcp_connectors.local_docs.mcp_server import build_server
+
+    server = build_server(_local_docs_config(tmp_path), client=_FakeLocalDocsClient())
+    with pytest.raises(ToolError) as excinfo:
+        asyncio.run(server.call_tool("search", {"query": "x", "directories": ["/etc"]}))
+    assert "/etc" in str(excinfo.value)
+
+
+def test_local_docs_server_main_exits_cleanly_when_config_missing(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("MCP_CONNECTORS_CONFIG_DIR", str(tmp_path))
+    from mcp_connectors.local_docs.mcp_server import main
+
+    with pytest.raises(SystemExit) as excinfo:
+        main()
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert "local-docs-mcp" in captured.err
+
+
+# -- OneDrive -----------------------------------------------------------------------
+
+
+class _FakeOneDriveClient:
+    def __init__(self):
+        self.search_calls = []
+        self.fetch_calls = []
+
+    def search(self, query, directories=None):
+        self.search_calls.append((query, directories))
+        return [Document(id="/onedrive/plan.md", title="plan.md", source="onedrive", container="/onedrive")]
+
+    def fetch(self, id):
+        self.fetch_calls.append(id)
+        return Document(id=id, title="plan.md", source="onedrive", container="/onedrive")
+
+
+def _onedrive_config(tmp_path):
+    from mcp_connectors.onedrive.config import OneDriveConnectorConfig
+
+    allowed = tmp_path / "OneDrive-Contoso"
+    allowed.mkdir()
+    return OneDriveConnectorConfig(allowed_directories=[str(allowed)], result_limit=10)
+
+
+def test_onedrive_server_registers_search_and_fetch_tools(tmp_path):
+    from mcp_connectors.onedrive.mcp_server import build_server
+
+    server = build_server(_onedrive_config(tmp_path), client=_FakeOneDriveClient())
+    tools = asyncio.run(server.list_tools())
+    assert {t.name for t in tools} == {"search", "fetch"}
+
+
+def test_onedrive_server_search_happy_path(tmp_path):
+    from mcp_connectors.onedrive.mcp_server import build_server
+
+    fake = _FakeOneDriveClient()
+    server = build_server(_onedrive_config(tmp_path), client=fake)
+    content, structured = asyncio.run(server.call_tool("search", {"query": "roadmap"}))
+    assert structured["result"][0]["title"] == "plan.md"
+
+
+def test_onedrive_server_main_exits_cleanly_when_config_missing(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("MCP_CONNECTORS_CONFIG_DIR", str(tmp_path))
+    from mcp_connectors.onedrive.mcp_server import main
+
+    with pytest.raises(SystemExit) as excinfo:
+        main()
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert "onedrive-mcp" in captured.err

@@ -14,6 +14,19 @@ follow the identical pattern — their config file shapes are in the
 swap `jira-mcp`/`jira.json` for `confluence-mcp`/`confluence.json` or
 `sharepoint-mcp`/`sharepoint.json` and everything else is the same.
 
+**Local directories (`local-docs-mcp`) and OneDrive (`onedrive-mcp`) are the
+one real exception to "everything else is the same": skip Step 2 (credential
+storage) entirely for both** — neither connector uses a credential, a
+keyring entry, or makes any network call. OneDrive reads the OneDrive
+desktop client's already-synced local folder directly off disk rather than
+calling Microsoft Graph, specifically to avoid Azure AD OAuth setup. Their
+config files are correspondingly simpler (just `allowed_directories` +
+`result_limit`, no `site`/`credential` block) — see the
+[Connector config reference](#connector-config-reference) for the exact
+shape. Everything else (Step 1 install, Step 4+ IDE/framework wiring) is
+the same pattern with `local-docs-mcp`/`local_docs.json` or
+`onedrive-mcp`/`onedrive.json` swapped in.
+
 ---
 
 ## 1. Setup with VS Code
@@ -24,7 +37,7 @@ git clone <the nova repo>
 cd nova/packages/mcp-connectors
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[jira]"          # add ,confluence / ,sharepoint if you want those too
+pip install -e ".[jira]"          # add ,confluence / ,sharepoint / ,local-docs / ,onedrive if you want those too
 ```
 
 **Step 2 — Store your Jira API token in the OS keyring** (never in a config
@@ -267,11 +280,71 @@ or, on-prem Server:
 Kerberos is **not implemented** for SharePoint Server (NTLM/Basic only) —
 a known, documented gap.
 
-**All three connectors resolve their credential at server *startup*, not
-on first search** (observed directly: an unset/wrong keyring entry makes
-the server process fail immediately on launch, not fail quietly on first
-use) — so if your MCP client shows the server as errored/not-connecting,
-check the credential and config file first.
+**Jira, Confluence, and SharePoint all resolve their credential at server
+*startup*, not on first search** (observed directly: an unset/wrong
+keyring entry makes the server process fail immediately on launch, not
+fail quietly on first use) — so if your MCP client shows the server as
+errored/not-connecting, check the credential and config file first.
+
+**Local Docs** (`local_docs.json`, `allowed_directories`) — no
+`site`/`credential` block at all: this connector makes no network call and
+needs no credential. Every directory listed is resolved to its real,
+canonical absolute path (`Path.resolve(strict=True)`) at config-load
+time — it must already exist, or loading the config fails immediately with
+a clear error.
+
+```json
+{
+  "allowed_directories": ["/Users/alice/notes", "/Users/alice/work-docs"],
+  "result_limit": 15
+}
+```
+
+`search`/`fetch` only ever read `.md`/`.markdown`/`.txt`/`.rst` files —
+PDF/Word/Excel/image files are explicitly out of scope for V1 (see
+`todo.md`). Every file's real, symlink-resolved path is verified to be
+inside one of the directories above before its content is ever read or
+returned — a symlink pointing outside this list, or a path-traversal-style
+`fetch` id (e.g. `"../../etc/passwd"`), is refused, not silently resolved.
+
+**OneDrive** (`onedrive.json`, `allowed_directories`) — structurally
+identical to Local Docs (same field name, same "no credential" shape); the
+only real difference is what you point it at and one extra behavior. Point
+it at your **already-synced local OneDrive folder(s)** — this connector
+never auto-detects the path (real sync-folder locations vary too much
+across OS/account type to guess reliably) and never calls Microsoft Graph:
+
+```json
+{
+  "allowed_directories": ["/Users/alice/Library/CloudStorage/OneDrive-Contoso"],
+  "result_limit": 15
+}
+```
+
+Typical real sync-folder locations, for reference (always verify your own
+actual path rather than assuming one of these):
+- **macOS**: `~/Library/CloudStorage/OneDrive-<AccountName>/` (current
+  OneDrive versions) or `~/OneDrive` (older versions).
+- **Windows**: `%USERPROFILE%\OneDrive` (personal account) or
+  `%USERPROFILE%\OneDrive - <Org Name>` (work/school account). Multiple
+  accounts can be synced side by side, each its own folder — list as many
+  `allowed_directories` entries as you need.
+
+One extra behavior beyond Local Docs: OneDrive's "Files On-Demand" feature
+can leave a file as a cloud-only placeholder (visible in the folder listing
+but not actually downloaded locally yet). This connector detects that on a
+best-effort basis (a Windows-specific file-attribute check, plus a
+zero-byte-file heuristic on any platform) and skips such files in `search`
+results / refuses them in `fetch` with a clear error, rather than returning
+empty or garbage content. This is **not** a complete solution — see
+`src/mcp_connectors/local_fs/search.py`'s module docstring for exactly what
+is and isn't detected (notably: not on macOS's own placeholder-status API,
+which isn't reachable from Python's stdlib).
+
+**Neither Local Docs nor OneDrive has a credential-resolution step at
+startup** — both fail at startup only if their config file is missing or
+names a directory that doesn't exist/isn't a directory; there is nothing
+else to check.
 
 ## What's still unverified
 
@@ -281,3 +354,21 @@ purpose, to show the error path, not a real one. Response parsing is
 defensive throughout, built against current API documentation. Treat a
 live-credentialed pass against a real tenant as required before production
 use, not as done.
+
+Local Docs and OneDrive are different: there's no external tenant to
+credential against, so a real end-to-end verification was possible and was
+actually run this session — a real MCP stdio client (the same pattern as
+section 3a's script) talking to a real `local-docs-mcp` process, against a
+real config file and a real directory on disk: `list_tools()` returned
+`['search', 'fetch']`, a real `search` call found and returned real file
+content, naming a directory outside the configured allowlist came back as
+`isError: True` with the allowlist-violation message, and a path-traversal
+`fetch` id (`"../../etc/passwd"`) came back as `isError: True` with the
+path-safety rejection message — not a crash, not a silently-resolved read.
+What's genuinely **not** verified: OneDrive's cloud-only-placeholder
+detection was only exercised against a synthetic zero-byte file standing in
+for a real placeholder (see `todo.md`) — no real OneDrive client/account
+was available to produce an actual Files-On-Demand placeholder to test
+against, and the Windows-specific file-attribute check has no Windows
+machine to verify against at all (only unit-tested via a monkeypatched
+`stat()` result).
