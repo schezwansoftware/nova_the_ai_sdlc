@@ -5,11 +5,14 @@ and **SharePoint** (Online + on-prem Server) — precise, project/space/site-
 scoped search and fetch, usable with any MCP-compatible client (Claude
 Desktop/Code, VS Code, IntelliJ, or your own agent framework).
 
-Zero dependency on any other project — no shared package namespace, no
-orchestration engine, nothing beyond this repo's own `src/mcp_connectors/`.
-Verified: a fresh venv with only `pip install -e ".[all]"` run against this
-repo passes the full test suite and resolves all three console scripts with
-no other package installed.
+This package lives inside the Nova (`ai-sdlc`) repo at
+`packages/mcp-connectors/`, but is a fully independent sibling package —
+zero dependency on `ai_sdlc` or any other project, no shared package
+namespace, no orchestration engine, nothing beyond this directory's own
+`src/mcp_connectors/`. Verified: a fresh venv with only
+`pip install -e ".[all]"` run from this directory passes the full test
+suite and resolves all three console scripts with no other package
+installed.
 
 ## The precision requirement
 
@@ -26,6 +29,7 @@ Every connector enforces scope in two places, always:
 ## Quick start
 
 ```bash
+cd packages/mcp-connectors   # from the Nova repo root
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[jira,confluence,sharepoint]"   # or just the one(s) you need

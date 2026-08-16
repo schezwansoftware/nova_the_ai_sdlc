@@ -7,9 +7,14 @@ project's package name anywhere in this codebase.
 
 ## 1. Install
 
+This package lives inside the Nova (`ai-sdlc`) repo, at
+`packages/mcp-connectors/` — it is **not** a separate repo to clone. It has
+its own `pyproject.toml` and its own dependency surface (no dependency on
+Nova's own `ai_sdlc` package, and vice versa), so it gets its own venv:
+
 ```bash
-git clone <this repo> mcp-connectors
-cd mcp-connectors
+git clone <the nova repo>
+cd nova/packages/mcp-connectors
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[jira,confluence,sharepoint]"   # or a subset, or `.[all]`
@@ -105,18 +110,18 @@ Kerberos is **not implemented** (NTLM/Basic only) — a known, documented gap.
   "servers": {
     "jira": {
       "type": "stdio",
-      "command": "/absolute/path/to/mcp-connectors/.venv/bin/jira-mcp",
-      "env": { "MCP_CONNECTORS_CONFIG_DIR": "/absolute/path/to/mcp-connectors/config" }
+      "command": "/absolute/path/to/nova/packages/mcp-connectors/.venv/bin/jira-mcp",
+      "env": { "MCP_CONNECTORS_CONFIG_DIR": "/absolute/path/to/nova/packages/mcp-connectors/config" }
     },
     "confluence": {
       "type": "stdio",
-      "command": "/absolute/path/to/mcp-connectors/.venv/bin/confluence-mcp",
-      "env": { "MCP_CONNECTORS_CONFIG_DIR": "/absolute/path/to/mcp-connectors/config" }
+      "command": "/absolute/path/to/nova/packages/mcp-connectors/.venv/bin/confluence-mcp",
+      "env": { "MCP_CONNECTORS_CONFIG_DIR": "/absolute/path/to/nova/packages/mcp-connectors/config" }
     },
     "sharepoint": {
       "type": "stdio",
-      "command": "/absolute/path/to/mcp-connectors/.venv/bin/sharepoint-mcp",
-      "env": { "MCP_CONNECTORS_CONFIG_DIR": "/absolute/path/to/mcp-connectors/config" }
+      "command": "/absolute/path/to/nova/packages/mcp-connectors/.venv/bin/sharepoint-mcp",
+      "env": { "MCP_CONNECTORS_CONFIG_DIR": "/absolute/path/to/nova/packages/mcp-connectors/config" }
     }
   }
 }
