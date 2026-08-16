@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-connectors"
+version = "0.1.0"
+description = "Standalone MCP servers for Jira, Confluence, and SharePoint -- precise, project/space/site-scoped search and fetch, usable with any MCP-compatible client."
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+# mcp>=2.0.0 relocates FastMCP (mcp.server.fastmcp.FastMCP no longer
+# exists under that path) -- this code was built and tested against
+# mcp==1.29.0. Do not lift the upper bound without porting the server
+# modules first.
+jira = ["mcp>=1.2.0,<2.0.0", "keyring>=24.0", "httpx>=0.27"]
+confluence = ["mcp>=1.2.0,<2.0.0", "keyring>=24.0", "httpx>=0.27"]
+sharepoint = [
+    "mcp>=1.2.0,<2.0.0",
+    "keyring>=24.0",
+    "httpx>=0.27",
+    "requests>=2.31",
+    "requests-ntlm>=1.2",
+]
+all = [
+    "mcp>=1.2.0,<2.0.0",
+    "keyring>=24.0",
+    "httpx>=0.27",
+    "requests>=2.31",
+    "requests-ntlm>=1.2",
+]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+jira-mcp = "mcp_connectors.jira.mcp_server:main"
+confluence-mcp = "mcp_connectors.confluence.mcp_server:main"
+sharepoint-mcp = "mcp_connectors.sharepoint.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

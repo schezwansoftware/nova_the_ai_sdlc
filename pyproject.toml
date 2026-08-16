@@ -40,67 +40,18 @@ copilot = ["github-copilot-sdk>=1.0.9"]
 # `copilot` above has.
 anthropic = ["anthropic>=0.121.0"]
 
-# Knowledge Base Tool Connectors (Phase 1) -- three standalone MCP
-# servers (`ai_sdlc/mcp_connectors/`), each independently installable
-# and runnable with zero dependency on the rest of this codebase's
-# orchestration machinery (see that package's module docstring for the
-# full scope boundary). `mcp` (the official MCP SDK) and `keyring`
-# (OS-native credential storage -- macOS Keychain / Windows Credential
-# Locker / Linux Secret Service, never a plaintext secret in a
-# connector's JSON config file) are common to all three; each extra
-# below lists them explicitly rather than promoting either to a base
-# project dependency, so `pip install ai-sdlc` (no extras) still never
-# requires them -- consistent with the `copilot`/`anthropic` extras
-# above already establishing "real integrations are opt-in, never a
-# forced base dependency" as this project's convention. `httpx` backs
-# Jira/Confluence's shared Atlassian HTTP client
-# (`mcp_connectors/atlassian/auth.py`) and SharePoint Online's Graph
-# client; `requests`/`requests-ntlm` back SharePoint Server (on-prem)'s
-# client specifically, since NTLM auth integrates with `requests` far
-# more commonly than `httpx` in the Python ecosystem (verified
-# installed/inspected: `requests-ntlm==1.3.0`'s `HttpNtlmAuth` -- see
-# `mcp_connectors/sharepoint/onprem_client.py`'s module docstring).
-# Version floors below match what was actually verified installed in
-# the environment this was built in, not guessed minimums.
-#
-# IMPORTANT, found the hard way while wiring this up (not from docs): the
-# `mcp` PyPI package shipped a breaking 2.0.0 release, current as of this
-# writing, that removes/relocates the high-level `FastMCP` server class
-# these three connectors' `mcp_server.py` modules import
-# (`mcp.server.fastmcp.FastMCP`) -- it no longer exists under that path
-# in 2.0.0 (renamed/restructured to `mcp.server.mcpserver.MCPServer`,
-# a different API this codebase has not been ported to or verified
-# against). Verified directly: installing this project with an
-# unconstrained `mcp` floor into a disposable venv resolved to 2.0.0 and
-# every connector's `mcp_server.py` failed to import
-# (`ModuleNotFoundError: No module named 'mcp.server.fastmcp'`) -- not a
-# hypothetical risk. Every connector in this pass was built against, and
-# tested against (including a real MCP-protocol-level tool-call/
-# error-response round-trip -- see
-# `tests/test_mcp_connectors_servers.py`), the installed `mcp==1.29.0`.
-# `<2.0.0` below excludes the confirmed-incompatible release; the floor
-# is kept loose (`>=1.2.0`, by when `FastMCP`'s stdio/tool-decorator
-# shape was already established) rather than pinned exactly to 1.29.0,
-# but only 1.29.0 itself was actually exercised. Porting to `mcp>=2.0.0`
-# is a real, scoped-out follow-up, not started here.
-jira = ["mcp>=1.2.0,<2.0.0", "keyring>=24.0", "httpx>=0.27"]
-confluence = ["mcp>=1.2.0,<2.0.0", "keyring>=24.0", "httpx>=0.27"]
-sharepoint = [
-    "mcp>=1.2.0,<2.0.0",
-    "keyring>=24.0",
-    "httpx>=0.27",
-    "requests>=2.31",
-    "requests-ntlm>=1.2",
-]
-
 [project.scripts]
 ai-sdlc = "ai_sdlc.cli.main:app"
-ai-sdlc-mcp-jira = "ai_sdlc.mcp_connectors.jira.mcp_server:main"
-ai-sdlc-mcp-confluence = "ai_sdlc.mcp_connectors.confluence.mcp_server:main"
-ai-sdlc-mcp-sharepoint = "ai_sdlc.mcp_connectors.sharepoint.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+# Scoped to this package's own tests only -- packages/mcp-connectors/ is a
+# fully independent sibling package with its own pyproject.toml/tests/venv;
+# without this, pytest's default recursive discovery picks up its test
+# files too and fails to collect them here (mcp_connectors isn't installed
+# in this package's own environment, nor should it be -- see
+# packages/mcp-connectors/README.md for why it's independent on purpose).
+testpaths = ["tests"]

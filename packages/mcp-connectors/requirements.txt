@@ -1,0 +1,21 @@
+# Standalone requirements for mcp-connectors (Jira, Confluence, SharePoint
+# MCP servers). Union of all three connectors -- verified sufficient on its
+# own in a completely fresh venv (no other package pre-installed).
+#
+# The `mcp<2.0.0` pin is load-bearing, not conservative-by-default: `mcp`
+# shipped a breaking 2.0.0 release that relocates FastMCP
+# (mcp.server.fastmcp.FastMCP -> a different path/class). This code was
+# built and tested against mcp==1.29.0. Do not remove the upper bound
+# without porting the server modules first.
+
+# --- Jira + Confluence (identical requirements) ---
+mcp>=1.2.0,<2.0.0
+keyring>=24.0
+httpx>=0.27
+
+# --- SharePoint only (adds on-prem NTLM support) ---
+requests>=2.31
+requests-ntlm>=1.2
+
+# --- shared by all three ---
+pydantic>=2.0

@@ -510,28 +510,50 @@ PR (see the still-open item above).
 
 ## Nexus — Knowledge Base Tool Connectors, Phase 1 (this pass, branch `agents/nexus-knowledge-base-connectors`)
 
-Three **standalone MCP (Model Context Protocol) servers** now exist under
-a new top-level package, `src/ai_sdlc/mcp_connectors/` — Jira, Confluence,
+**Correction, found via direct user review after the first version of this
+pass (which nested the package at `src/ai_sdlc/mcp_connectors/`) was
+already open as a PR: that layout wasn't actually independent of Nova at
+the packaging level, only at the runtime-call level.** Every internal
+import was absolute and rooted at `ai_sdlc.mcp_connectors.*`, so a bare
+copy of just the connectors folder failed with `ModuleNotFoundError: No
+module named 'ai_sdlc'` outside that exact package structure — confirmed
+by actually testing the bare-copy scenario in a venv that never had
+`ai-sdlc` installed, not assumed. Restructured to live at
+**`packages/mcp-connectors/`** instead — a fully separate, sibling
+top-level package with its own `pyproject.toml`/`README.md`/`INSTALL.md`,
+its own Python package name (`mcp_connectors`, no `ai_sdlc` prefix
+anywhere), and its own console-script names (`jira-mcp`/`confluence-mcp`/
+`sharepoint-mcp`, renamed from `ai-sdlc-mcp-*`). Still lives in this same
+repo (a monorepo-with-independent-sub-packages layout, not a separate git
+repo — that was tried first and reverted as unnecessary overhead once the
+real requirement turned out to be import/packaging independence, not
+repository independence) but Nova's own `pyproject.toml` has zero
+reference to it — no shared dependency, no shared package namespace.
+Re-verified from a completely fresh venv after the move: `pip install -e
+"packages/mcp-connectors[all,dev]"` alone (nothing else pre-installed)
+passes all 139 tests and resolves all three console scripts.
+
+Three **standalone MCP (Model Context Protocol) servers** exist under
+`packages/mcp-connectors/src/mcp_connectors/` — Jira, Confluence,
 SharePoint — each independently installable/runnable with **zero
-dependency on the rest of this codebase's orchestration machinery**
-(`ai_sdlc.orchestration`/`ai_sdlc.agents`/`ai_sdlc.capabilities`/
-`ai_sdlc.cli` are never imported anywhere in this package). This closes
-the "Jira/Confluence Enterprise Connectors are still entirely deferred"
-item under Sage's follow-up below — **partially**, see that item's own
-updated note for exactly how far, since the connectors existing and
-being wired into Nova's own agent framework are two different things and
-only the former happened this pass.
+dependency on Nova at all**, not just on its orchestration machinery.
+This closes the "Jira/Confluence Enterprise Connectors are still entirely
+deferred" item under Sage's follow-up below — **partially**, see that
+item's own updated note for exactly how far, since the connectors
+existing and being wired into Nova's own agent framework are two
+different things and only the former happened this pass.
 
 Built on the official standalone `mcp` Python SDK
 (`mcp.server.fastmcp.FastMCP`, stdio transport), deliberately **not**
 `claude_agent_sdk`'s in-process `create_sdk_mcp_server` helper — that one
 can't run as its own standalone process, which is exactly why the
 approved design rejected it. Each connector ships its own console-script
-entry point (`ai-sdlc-mcp-jira`, `ai-sdlc-mcp-confluence`,
-`ai-sdlc-mcp-sharepoint`) and its own optional `pyproject.toml` extra
-(`jira`, `confluence`, `sharepoint`), mirroring the existing
-`copilot`/`anthropic` extras' "real integration is opt-in, mock/nothing
-is the hard default" convention.
+entry point (`jira-mcp`, `confluence-mcp`, `sharepoint-mcp`) and its own
+optional `pyproject.toml` extra (`jira`, `confluence`, `sharepoint`),
+mirroring the existing `copilot`/`anthropic` extras' "real integration is
+opt-in, mock/nothing is the hard default" convention — now inside
+`packages/mcp-connectors/pyproject.toml`, its own independent dependency
+surface, not Nova's root `pyproject.toml`.
 
 - [x] **Shared scaffolding** (`mcp_connectors/common.py`): one `Document`
       result model (`id`/`title`/`snippet`/`source`/`url`/
@@ -555,7 +577,7 @@ is the hard default" convention.
       converted into a real `CallToolResult(isError=True, ...)` MCP
       response — no bespoke translation layer needed at that boundary.
       Proven end to end, not just read about:
-      `tests/test_mcp_connectors_servers.py::
+      `packages/mcp-connectors/tests/test_servers.py::
       test_allowlist_violation_becomes_a_real_mcp_tool_error` drives the
       actual low-level protocol handler and asserts `isError is True`
       with the raised exception's message in the response content.
