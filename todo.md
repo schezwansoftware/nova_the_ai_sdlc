@@ -741,12 +741,15 @@ boundary**:
 
 - [ ] **Phase 2 (Sage-style aggregator + agent-framework wiring)** —
       nothing in this pass touches `RetrievalCapability`, the
-      orchestrator, or any specialist agent. A future pass would need to
-      decide how (or whether) an agent fans a query out across all three
-      connectors, how a workspace configures which connectors are
-      active, and whether that goes through the existing
-      `AI_SDLC_AGENT_FRAMEWORK` selection or something connector-specific.
-      None of those questions were answered or even opened here.
+      orchestrator, or any specialist agent.
+      **Design now fully locked (2026-08-16), zero code written** — see
+      "Sage — Phase 2 Knowledge Consumption Design" below for the complete
+      design (superseded the "aggregator" framing entirely: Sage runs an
+      isolated sub-session per question instead of pre-fetching/merging
+      across connectors). All of the open questions this bullet
+      originally raised (how an agent reaches connectors, how a workspace
+      configures which are active, whether it shares
+      `AI_SDLC_AGENT_FRAMEWORK`) are answered there.
 - [ ] Kerberos auth for SharePoint Server (see above).
 - [ ] Porting to `mcp>=2.0.0` (see above).
 - [ ] No credential-provisioning CLI/wizard — an operator runs
@@ -760,6 +763,153 @@ boundary**:
       approved design), but there's no way to page further into a larger
       result set from the MCP tool interface itself if a caller wanted
       to.
+
+## Sage — Phase 2 Knowledge Consumption Design (approved design, 2026-08-16 — zero implementation yet)
+
+Full design brainstorm for how Nova's own specialist agents (PO/Architecture/
+UX/Developer) actually consume the 5 MCP connectors shipped above. Explicitly
+design-only, matching how the connectors themselves were designed-then-built
+in two separate passes. Nothing below is implemented — this section exists so
+whoever picks this up next has the complete, already-thought-through design
+rather than starting from the open questions the two Nexus sections above
+originally left behind.
+
+- [ ] **Sage runs each question in its own isolated sub-session — not a
+      pre-fetch aggregator, and not shared tools on the calling agent.**
+      Rejected two other shapes first: (1) a Sage aggregator that fans a
+      query out to every connector, merges/dedups/ranks before the agent
+      even starts thinking — too much bespoke code duplicating what an
+      agentic tool-use loop already does, and wasteful (fetches from every
+      source regardless of relevance); (2) giving the calling agent's own
+      reasoning session direct MCP tool access — checked against the real
+      code (`capabilities/reasoning.py` + `reasoning_anthropic.py` +
+      `reasoning_copilot.py`) and confirmed `ReasoningCapability.complete()`
+      is **structurally zero-tool by deliberate design** (Copilot provider
+      passes `available_tools=[]`, Anthropic provider forces a single
+      `tool_choice`) — an explicit anti-prompt-injection guarantee that
+      giving PO/Architecture/UX/Developer live tool access would break.
+      **What's locked instead**: the calling agent never touches
+      connectors directly. It asks Sage a plain-language question; Sage
+      spins up its own separate, isolated, bounded agentic session (same
+      "bounded session, one task, structured output" shape
+      `reasoning_copilot.py` already established) with MCP tools attached
+      *only inside that sub-session*. Only the final distilled, cited
+      answer crosses back — never the raw tool-call transcript — keeping
+      the calling agent's own context window untouched by search noise.
+- [ ] **Tool wiring must be framework-agnostic, not Claude-only.** One
+      shared, provider-agnostic resolver (new small module, plain data, no
+      SDK imports) turns "this workspace's enabled connectors" into MCP
+      server specs + resulting tool names; each framework's provider
+      (`claude_sdk.py` today, `coding_copilot.py`/`reasoning_copilot.py`
+      today, any future framework) does only a thin last-step translation
+      into its own SDK's native tool-config mechanism. Closes the gap
+      `INSTALL.md` §3b already flagged (`claude_sdk.py` never passes
+      `mcp_servers`), generalized so a future framework only needs the thin
+      adapter, never re-solving "which connectors, what config."
+      **Not yet verified**: whether Copilot's SDK exposes an allowlist step
+      the same way Claude's does — check the installed SDK before assuming
+      symmetry.
+- [ ] **New per-project connector-enablement config**, e.g.
+      `.ai-sdlc/connectors.json` — deliberately separate from `CLIConfig`
+      and from `AI_SDLC_AGENT_FRAMEWORK` (different questions: which LLM
+      runs Nova's own agents vs. which knowledge sources Sage can reach).
+      Declared at `ai-sdlc init` via a multi-select checklist (mirrors the
+      existing agent-framework arrow-key menu). Per-project, not global.
+      Stores only which connector IDs are on + how to launch each MCP
+      server — does **not** duplicate each connector's own fine-grained
+      scoping (allowed projects/spaces), which stays in that connector's
+      own existing config file untouched. "Declare now, configure later" is
+      fine (matches the already-shipped two-step auth model). No
+      enable/disable CLI command for V1 — hand-edit the file or re-run
+      init. A connector enabled but never properly configured is **skipped
+      quietly** when Sage tries to use it (not a hard error), with the skip
+      itself noted in the visible log below.
+- [ ] **Orion mediates via the already-shipped `needs_clarification`
+      pattern, generalized — not a live tool inside reasoning.** Reuses the
+      exact schema mechanism from PR #31 (`needs_clarification`/
+      `clarification_question`), generalized to a second flag (e.g.
+      `needs_context`/`context_query`) a worker's own structured output can
+      set when it judges it's genuinely missing something. Preserves the
+      zero-tool guarantee above (it's a schema field, not a live tool call)
+      while still making "ask for help" driven by the worker's own
+      per-task judgment rather than a blanket rule applied to every
+      invocation — this is what delivers "only when genuinely necessary"
+      instead of pulling unnecessary context on every run. Orion (which
+      already owns pause/resume for clarification/approval interrupts) sees
+      the flag, checks local memory (see below), asks Sage only if memory
+      came up empty, then resumes the worker with the answer merged into
+      its inputs — same resume shape as clarification, except this
+      resolves **automatically**, no human involved, since Sage is
+      answering, not a person. **Orion stays a pure, dumb messenger** — it
+      never needs to know connectors exist or which one to check; all
+      routing knowledge lives inside Sage alone, reaffirmed explicitly
+      after considering (and rejecting) having the caller hint at which
+      connector is relevant.
+- [ ] **Full, structured, visible logging — for humans now and Sentinel
+      later.** Explicit user requirement: every state change must be
+      visible, not silent, even though this flow never blocks waiting for a
+      human. Every step (worker's request → memory check result → Sage
+      invocation → Sage's answer + source + duration → worker resuming)
+      gets written as a **structured** record (not prose) into the
+      existing `.ai-sdlc/audit/` mechanism (confirmed to already exist via
+      `orchestration/state.py`) — full detail, not a summary, since a
+      summary would be useless for Sentinel's later analysis ("is local
+      memory saving time," "which connector is dead weight," "does asking
+      Sage correlate with better outcomes"). The same live CLI status
+      display already used for "Thinking... Ns..." during real LLM calls
+      should narrate this flow in real time too (e.g. "Asking Sage about
+      X... 12s... Sage found an answer (source: Confluence)").
+- [ ] **Local memory, owned by Sage — no new agent.** The "keep a running
+      memory of what's been learned" job belongs to Sage (already owns
+      "Knowledge/RAG... context engineering" per the ownership table), not
+      a new team member. Written immediately the moment Sage successfully
+      answers something — no periodic consolidation/cleanup process for V1,
+      matching this project's consistent "no indexing/sync infra until
+      proven necessary" philosophy already used for `RetrievalCapability`
+      and all 5 connectors. Checking memory stays a **cheap, plain lookup**
+      — explicitly not a search index/vector store/another agentic
+      session, since the whole point is the common case has to be
+      near-free. Each saved entry keeps its **source and save-date**
+      alongside the answer (a fact without provenance can't later be
+      judged trustworthy); Sage is selective about what's worth saving, not
+      everything it ever returns; older entries are treated as *possibly
+      stale*, not permanent truth, since a cached Jira/Confluence answer
+      can go stale after the source changes.
+- [ ] **Five follow-up decisions, all approved:**
+      1. **Safety of retrieved content** — relies on connectors already
+         being **read-only by construction** (none can write/delete) as the
+         primary, already-true mitigation. The deeper "sanitize retrieved
+         text against hidden injected instructions" gap is explicitly
+         **not** solved here — it's the same pre-existing gap already
+         flagged against `MockReasoningProvider` elsewhere in this file
+         (Aegis's eventual job), just newly relevant to Sage too. Not made
+         worse, not fixed.
+      2. **Sage finds nothing anywhere** (memory miss + every relevant
+         connector empty) — reported back as a normal, valid "nothing
+         found" result, not an error; the worker's own next reasoning pass
+         decides whether to proceed with a caveat or escalate to a real
+         human clarifying question via the existing mechanism. Deliberately
+         not hardcoded as a fixed rule in Orion.
+      3. **A connector is configured correctly but fails live** (timeout,
+         expired credential, outage) — already covered by the existing,
+         verified MCP error contract (a real exception already comes back
+         as a clean `isError: true` tool result, not a crash, confirmed
+         against installed `mcp` package behavior in Phase 1). Sage's own
+         task instructions just need to say "don't treat one failed source
+         as fatal, try what's left."
+      4. **Connector routing** — stays entirely Sage's own judgment call
+         every time, never hinted at by the caller or known by Orion.
+      5. **Which AI framework Sage itself runs on** — inherits the same
+         single `AI_SDLC_AGENT_FRAMEWORK` setting as the rest of the
+         platform; no separate Sage-specific choice unless real evidence
+         later shows one framework is meaningfully better at tool-use/
+         search tasks specifically.
+
+**Still genuinely open, not part of this design pass**: what Sentinel (the
+eval/QA agent, also still fully unbuilt) actually *does* with these logs once
+they exist. The shared-resolver module, the `connectors.json` shape, the
+`needs_context` schema field, and Sage's own capability/provider code are all
+unbuilt — this whole section is design, not a changelog entry.
 
 ## Nexus — Local Directories & OneDrive Connectors, Phase 1 (cont'd) (this pass, branch `agents/nexus-local-onedrive-connectors`)
 
