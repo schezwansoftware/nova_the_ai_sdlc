@@ -30,23 +30,54 @@ first search. This is the config-time half of the precision requirement
 -- see `mcp_connectors/local_fs/search.py`'s module docstring for the
 query-time half (real-path/symlink-escape verification), which is where
 the actual security guarantee lives.
+
+## `file_categories`: an explicit, opt-in permission gate on file type
+
+`file_categories` defaults to `["text"]` -- exactly this connector's
+original, pre-existing V1 behavior (`.md`/`.markdown`/`.txt`/`.rst`
+only). To also read source/config files and/or real embedded text from
+office documents, opt in explicitly:
+
+```json
+{
+  "allowed_directories": ["/Users/alice/notes", "/Users/alice/repo"],
+  "file_categories": ["text", "code", "office", "pdf"],
+  "result_limit": 15
+}
+```
+
+See `mcp_connectors/local_fs/search.py`'s module docstring for exactly
+what each of `"text"`/`"code"`/`"office"`/`"pdf"` covers, and for why
+OCR/image-based text recognition is explicitly, permanently out of
+scope regardless of what's opted into here. `"office"`/`"pdf"` need the
+`documents` extra installed (`pip install mcp-connectors[local-docs,
+documents]`) -- requesting either without it fails config loading
+immediately with a clear error (`_validate_file_categories`, below),
+not a silent no-op at query time. An existing config with no
+`file_categories` key at all keeps working exactly as before -- this
+field's addition is backward compatible, not a breaking schema change.
 """
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List
+from typing import List, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mcp_connectors.common import DEFAULT_RESULT_LIMIT, MAX_RESULT_LIMIT, ConnectorConfigError, connectors_config_dir
+from mcp_connectors.local_fs.search import missing_libraries_for_categories
 
 CONFIG_FILE_NAME = "local_docs.json"
+
+FileCategory = Literal["text", "code", "office", "pdf"]
 
 
 class LocalDocsConnectorConfig(BaseModel):
     """This connector's full config: the hard allowlist of local
     directories it may ever read from (the config-time half of the
-    precision requirement -- see module docstring), and the search
+    precision requirement -- see module docstring), which categories of
+    file it may read (the config-time "permission" gate on file type --
+    see module docstring's `file_categories` section), and the search
     result cap."""
 
     model_config = ConfigDict(extra="forbid")
@@ -57,6 +88,12 @@ class LocalDocsConnectorConfig(BaseModel):
     #: mistake to surface at load time (matches `JiraConnectorConfig
     #: .allowed_projects`'s same posture).
     allowed_directories: List[str] = Field(min_length=1)
+    #: Which categories of file this connector may read -- see module
+    #: docstring. Defaults to `["text"]` only, matching this connector's
+    #: original V1 behavior exactly, so an existing config file with no
+    #: `file_categories` key at all is unaffected by this field's
+    #: addition (backward compatible, not a breaking schema change).
+    file_categories: List[FileCategory] = Field(default_factory=lambda: ["text"])
     result_limit: int = Field(default=DEFAULT_RESULT_LIMIT, ge=1, le=MAX_RESULT_LIMIT)
 
     @field_validator("allowed_directories")
@@ -93,6 +130,35 @@ class LocalDocsConnectorConfig(BaseModel):
         if not resolved:
             raise ValueError("allowed_directories must contain at least one non-empty directory path")
         return resolved
+
+    @field_validator("file_categories")
+    @classmethod
+    def _validate_file_categories(cls, value: List[str]) -> List[str]:
+        """De-dupes while preserving first-seen order, and -- the actual
+        "permission" gate the project owner asked for -- fails config
+        loading immediately, with a clear installable fix, if `"office"`/
+        `"pdf"` is requested but its parsing library isn't importable in
+        this environment (`missing_libraries_for_categories`, from
+        `local_fs/search.py`). `pydantic`'s own `Literal["text", "code",
+        "office", "pdf"]` element type already rejects an unknown
+        category name -- this validator doesn't need to re-check that."""
+        seen = set()
+        deduped: List[str] = []
+        for item in value:
+            if item not in seen:
+                seen.add(item)
+                deduped.append(item)
+        if not deduped:
+            raise ValueError("file_categories must contain at least one category (the default is ['text'])")
+        missing = missing_libraries_for_categories(deduped)
+        if missing:
+            raise ValueError(
+                f"file_categories {deduped!r} requests a category whose parsing "
+                f"library isn't installed in this environment: {missing!r}. Install "
+                "the `documents` extra to enable 'office'/'pdf' support: "
+                "pip install mcp-connectors[local-docs,documents]"
+            )
+        return deduped
 
 
 def config_path() -> Path:

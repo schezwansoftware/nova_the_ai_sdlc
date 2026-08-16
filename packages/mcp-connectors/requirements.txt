@@ -20,7 +20,18 @@ requests-ntlm>=1.2
 
 # --- local_docs + onedrive: pure local-filesystem access, no credential,
 # --- no HTTP client, no network call at all -- `mcp` (for FastMCP) is the
-# --- only real dependency beyond stdlib `pathlib`/`os`.
+# --- only real dependency beyond stdlib `pathlib`/`os` for the default
+# --- "text"/"code" file_categories.
 
 # --- shared by all five ---
 pydantic>=2.0
+
+# --- optional: local_docs/onedrive's "office"/"pdf" file_categories only
+# --- (NOT installed by default here, matching pyproject.toml's `documents`
+# --- extra being deliberately separate from `all` -- see that file's
+# --- comment for why). Uncomment if you want office/PDF real-embedded-text
+# --- extraction support:
+# python-docx>=1.0
+# openpyxl>=3.1
+# python-pptx>=0.6
+# pypdf>=4.0

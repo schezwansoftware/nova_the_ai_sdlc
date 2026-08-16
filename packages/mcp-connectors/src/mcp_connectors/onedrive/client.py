@@ -8,8 +8,11 @@ docstring for exactly what detection this opts into and its documented
 limits).
 
 This module owns none of the actual search/path-safety logic itself --
-see `local_fs/search.py` -- only this connector's own scope and the
-query-time allowlist check.
+see `local_fs/search.py` -- only this connector's own scope
+(`config.allowed_directories`, `config.file_categories`) and the
+query-time allowlist check. `file_categories` is passed straight through
+from config on every call -- see `local_docs/client.py`'s docstring for
+the identical rationale.
 """
 from __future__ import annotations
 
@@ -50,6 +53,7 @@ class OneDriveClient:
             source=SOURCE,
             limit=self._config.result_limit,
             detect_cloud_placeholders=True,
+            file_categories=self._config.file_categories,
         )
 
     def fetch(self, file_id: str) -> Document:
@@ -60,4 +64,10 @@ class OneDriveClient:
         explaining it hasn't been downloaded locally yet, rather than
         returning empty/garbage content."""
         allowed_paths = [Path(item) for item in self._config.allowed_directories]
-        return fetch_local_file(file_id, allowed_paths, source=SOURCE, detect_cloud_placeholders=True)
+        return fetch_local_file(
+            file_id,
+            allowed_paths,
+            source=SOURCE,
+            detect_cloud_placeholders=True,
+            file_categories=self._config.file_categories,
+        )

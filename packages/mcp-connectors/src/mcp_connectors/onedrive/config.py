@@ -45,6 +45,27 @@ time (this module's `field_validator`, below) -- it must already exist
 and be a real directory, or config loading fails immediately with a
 clear error.
 
+## `file_categories`: an explicit, opt-in permission gate on file type
+
+Same as `local_docs` -- see that module's docstring for the full
+rationale, this is the identical mechanism. Defaults to `["text"]`,
+backward compatible with any config predating this field:
+
+```json
+{
+  "allowed_directories": ["/Users/alice/Library/CloudStorage/OneDrive-Contoso"],
+  "file_categories": ["text", "office", "pdf"],
+  "result_limit": 15
+}
+```
+
+`"office"`/`"pdf"` need the `documents` extra
+(`pip install mcp-connectors[onedrive,documents]`) -- requesting either
+without it fails config loading immediately with a clear error. OCR/
+image-based text recognition is explicitly out of scope regardless of
+what's opted into here -- see `mcp_connectors/local_fs/search.py`'s
+module docstring.
+
 ## OneDrive Files-On-Demand: read this before assuming every listed file is real
 
 A file that *appears* in this folder isn't guaranteed to have real local
@@ -59,22 +80,27 @@ solved" claim.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List
+from typing import List, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mcp_connectors.common import DEFAULT_RESULT_LIMIT, MAX_RESULT_LIMIT, ConnectorConfigError, connectors_config_dir
+from mcp_connectors.local_fs.search import missing_libraries_for_categories
 
 CONFIG_FILE_NAME = "onedrive.json"
+
+FileCategory = Literal["text", "code", "office", "pdf"]
 
 
 class OneDriveConnectorConfig(BaseModel):
     """This connector's full config: the hard allowlist of local
     OneDrive-sync-folder path(s) it may ever read from (the config-time
-    half of the precision requirement -- see module docstring), and the
-    search result cap. Structurally identical to
-    `LocalDocsConnectorConfig` -- see this module's docstring for why
-    that's expected, not an accident."""
+    half of the precision requirement -- see module docstring), which
+    categories of file it may read (the config-time "permission" gate --
+    see module docstring's `file_categories` section), and the search
+    result cap. Structurally identical to `LocalDocsConnectorConfig` --
+    see this module's docstring for why that's expected, not an
+    accident."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -82,6 +108,11 @@ class OneDriveConnectorConfig(BaseModel):
     #: ever read from. Must be non-empty. Never auto-detected -- see
     #: module docstring.
     allowed_directories: List[str] = Field(min_length=1)
+    #: Which categories of file this connector may read -- see module
+    #: docstring. Defaults to `["text"]` only, matching this connector's
+    #: original V1 behavior exactly (backward compatible, not a breaking
+    #: schema change).
+    file_categories: List[FileCategory] = Field(default_factory=lambda: ["text"])
     result_limit: int = Field(default=DEFAULT_RESULT_LIMIT, ge=1, le=MAX_RESULT_LIMIT)
 
     @field_validator("allowed_directories")
@@ -121,6 +152,31 @@ class OneDriveConnectorConfig(BaseModel):
         if not resolved:
             raise ValueError("allowed_directories must contain at least one non-empty directory path")
         return resolved
+
+    @field_validator("file_categories")
+    @classmethod
+    def _validate_file_categories(cls, value: List[str]) -> List[str]:
+        """Identical to `LocalDocsConnectorConfig._validate_file_categories`
+        -- see that module for the full rationale, duplicated here for the
+        same "each connector's config model is self-contained" reason
+        `_normalize_directories` above already explains."""
+        seen = set()
+        deduped: List[str] = []
+        for item in value:
+            if item not in seen:
+                seen.add(item)
+                deduped.append(item)
+        if not deduped:
+            raise ValueError("file_categories must contain at least one category (the default is ['text'])")
+        missing = missing_libraries_for_categories(deduped)
+        if missing:
+            raise ValueError(
+                f"file_categories {deduped!r} requests a category whose parsing "
+                f"library isn't installed in this environment: {missing!r}. Install "
+                "the `documents` extra to enable 'office'/'pdf' support: "
+                "pip install mcp-connectors[onedrive,documents]"
+            )
+        return deduped
 
 
 def config_path() -> Path:

@@ -2,7 +2,8 @@
 `mcp_connectors.local_fs.search`'s shared walk/search/path-safety logic
 -- this module owns none of that logic itself (see that module's
 docstring), only this connector's own scope (`source="local_docs"`,
-`config.allowed_directories`) and the query-time allowlist check.
+`config.allowed_directories`, `config.file_categories`) and the
+query-time allowlist check.
 
 `detect_cloud_placeholders=False` throughout: this connector reads plain
 local directories, not a OneDrive sync folder, so a zero-byte `.txt`/
@@ -11,6 +12,12 @@ placeholder -- see `local_fs/search.py`'s module docstring for why that
 detection is opt-in per connector rather than always-on. Compare
 `onedrive/client.py`, which is otherwise structurally identical but
 passes `detect_cloud_placeholders=True`.
+
+`file_categories` is passed straight through from config on every call
+-- this client does no category logic of its own (extension resolution,
+the office/pdf library-availability check) beyond what
+`local_fs/search.py` and `LocalDocsConnectorConfig`'s own field
+validator already do.
 """
 from __future__ import annotations
 
@@ -49,6 +56,7 @@ class LocalDocsClient:
             source=SOURCE,
             limit=self._config.result_limit,
             detect_cloud_placeholders=False,
+            file_categories=self._config.file_categories,
         )
 
     def fetch(self, file_id: str) -> Document:
@@ -57,4 +65,10 @@ class LocalDocsClient:
         resolution, symlink-escape and path-traversal rejection) is
         enforced by `fetch_local_file` -- see `local_fs/search.py`."""
         allowed_paths = [Path(item) for item in self._config.allowed_directories]
-        return fetch_local_file(file_id, allowed_paths, source=SOURCE, detect_cloud_placeholders=False)
+        return fetch_local_file(
+            file_id,
+            allowed_paths,
+            source=SOURCE,
+            detect_cloud_placeholders=False,
+            file_categories=self._config.file_categories,
+        )

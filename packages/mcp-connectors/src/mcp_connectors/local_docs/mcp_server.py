@@ -6,10 +6,13 @@ transport -- same construction as every other connector in this package
 (see `jira/mcp_server.py`'s module docstring for the verified-against-
 the-installed-package rationale, which applies identically here).
 
-Only imports `mcp` and `mcp_connectors.{common,local_fs,local_docs}` --
-no HTTP client, no `keyring`, no other project's code -- this connector
-needs strictly less than Jira/Confluence/SharePoint since it has no
-credential or network boundary at all.
+Only imports `mcp` and `mcp_connectors.{common,local_fs,local_docs}`, plus
+-- only if this connector's config opts into the `"office"`/`"pdf"`
+`file_categories` -- the `documents` extra's parsing libraries (deferred-
+imported by `local_fs/search.py`, not here) -- no HTTP client, no
+`keyring`, no other project's code -- this connector needs strictly less
+than Jira/Confluence/SharePoint since it has no credential or network
+boundary at all.
 
 Exceptions raised inside `search`/`fetch` below (typically
 `ConnectorConfigError`/`ConnectorAPIError` from `common.py`/
@@ -43,12 +46,16 @@ def build_server(config: LocalDocsConnectorConfig, *, client: Optional[LocalDocs
     server = FastMCP(
         SERVER_NAME,
         instructions=(
-            "Search and fetch plain-text files (.md/.markdown/.txt/.rst only -- "
-            "PDF/Word/Excel/image formats are a deliberately deferred V1 gap, "
-            "see todo.md) from this connector's configured local directory "
-            f"allowlist: {config.allowed_directories}. Every search/fetch resolves "
-            "the real, symlink-followed path of each file and verifies it is "
-            "actually inside one of these directories before returning its "
+            "Search and fetch files from this connector's configured local "
+            f"directory allowlist: {config.allowed_directories}. Readable file "
+            f"types are gated by this connector's configured file_categories "
+            f"({config.file_categories}) -- 'text' (.md/.markdown/.txt/.rst) is the "
+            "default; 'code' (source/config files), 'office' (.docx/.xlsx/.pptx), "
+            "and 'pdf' are opt-in via config, not auto-enabled. OCR/image-based "
+            "text recognition is out of scope regardless of configured categories "
+            "-- a deliberate exclusion, not a gap. Every search/fetch resolves the "
+            "real, symlink-followed path of each file and verifies it is actually "
+            "inside one of the allowlisted directories before returning its "
             "content -- naming a directory outside this list, or a "
             "path-traversal/symlink-escape id, is refused, never silently widened "
             "or resolved. No credential, no network call -- this reads local disk "

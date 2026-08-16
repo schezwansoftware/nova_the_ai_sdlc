@@ -13,11 +13,18 @@ from pathlib import Path
 import pytest
 
 from mcp_connectors.common import ConnectorAPIError
+from mcp_connectors.local_fs import search as local_fs_search
 from mcp_connectors.local_fs.search import (
+    CODE_EXTENSIONS,
+    OFFICE_EXTENSIONS,
+    PDF_EXTENSIONS,
     PLAIN_TEXT_EXTENSIONS,
+    TEXT_EXTENSIONS,
+    extensions_for_categories,
     fetch_local_file,
     iter_candidate_files,
     looks_like_cloud_only_placeholder,
+    missing_libraries_for_categories,
     require_within_allowlist,
     search_local_files,
 )
@@ -294,3 +301,165 @@ def test_local_docs_style_zero_byte_file_is_not_flagged_when_detection_disabled(
 
 def test_plain_text_extensions_constant_matches_documented_scope():
     assert PLAIN_TEXT_EXTENSIONS == frozenset({".md", ".markdown", ".txt", ".rst"})
+
+
+# -- file_categories: extension resolution ---------------------------------------
+
+
+def test_extensions_for_categories_text_only_is_the_default_scope():
+    assert extensions_for_categories(["text"]) == TEXT_EXTENSIONS
+
+
+def test_extensions_for_categories_unions_multiple_categories():
+    result = extensions_for_categories(["text", "code"])
+    assert result == TEXT_EXTENSIONS | CODE_EXTENSIONS
+
+
+def test_extensions_for_categories_office_and_pdf():
+    assert extensions_for_categories(["office"]) == OFFICE_EXTENSIONS
+    assert extensions_for_categories(["pdf"]) == PDF_EXTENSIONS
+
+
+def test_extensions_for_categories_unknown_category_contributes_nothing():
+    assert extensions_for_categories(["not-a-real-category"]) == frozenset()
+
+
+# -- file_categories: the "permission" gate -- withheld access when not opted in --
+
+
+def test_search_does_not_find_code_file_when_only_text_category_enabled(tmp_path):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    (allowed / "script.py").write_text("unique-code-marker-1", encoding="utf-8")
+
+    results = search_local_files(
+        "unique-code-marker-1", [allowed], source="test", limit=10, file_categories=["text"]
+    )
+    assert results == []
+
+
+def test_search_finds_code_file_once_code_category_enabled(tmp_path):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    (allowed / "script.py").write_text("unique-code-marker-2", encoding="utf-8")
+
+    results = search_local_files(
+        "unique-code-marker-2", [allowed], source="test", limit=10, file_categories=["text", "code"]
+    )
+    assert [doc.title for doc in results] == ["script.py"]
+
+
+def test_fetch_rejects_code_file_when_category_not_enabled(tmp_path):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    script = allowed / "script.py"
+    script.write_text("print('hi')", encoding="utf-8")
+
+    with pytest.raises(ConnectorAPIError) as excinfo:
+        fetch_local_file(str(script), [allowed], source="test", file_categories=["text"])
+    assert "file_categories" in str(excinfo.value)
+
+
+def test_fetch_succeeds_for_code_file_once_category_enabled(tmp_path):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    script = allowed / "script.py"
+    script.write_text("print('hi')", encoding="utf-8")
+
+    doc = fetch_local_file(str(script), [allowed], source="test", file_categories=["text", "code"])
+    assert "print" in doc.snippet
+
+
+def test_search_default_file_categories_is_text_only(tmp_path):
+    """`search_local_files`'s own default (no `file_categories` passed
+    at all) must match `DEFAULT_FILE_CATEGORIES` / each config model's
+    default -- i.e. any caller written before file_categories existed
+    keeps its original text-only behavior unchanged."""
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    (allowed / "script.py").write_text("unique-code-marker-3", encoding="utf-8")
+    (allowed / "note.md").write_text("unique-code-marker-3", encoding="utf-8")
+
+    results = search_local_files("unique-code-marker-3", [allowed], source="test", limit=10)
+    assert [doc.title for doc in results] == ["note.md"]
+
+
+# -- missing_libraries_for_categories: the config-validation-time library check --
+
+
+def test_missing_libraries_for_categories_empty_when_nothing_requires_a_library():
+    assert missing_libraries_for_categories(["text", "code"]) == []
+
+
+def test_missing_libraries_for_categories_reports_all_three_office_libs(monkeypatch):
+    monkeypatch.setattr(local_fs_search, "_DOCX_IMPORT_ERROR", ImportError("no docx"))
+    monkeypatch.setattr(local_fs_search, "_OPENPYXL_IMPORT_ERROR", ImportError("no openpyxl"))
+    monkeypatch.setattr(local_fs_search, "_PPTX_IMPORT_ERROR", ImportError("no pptx"))
+    missing = missing_libraries_for_categories(["office"])
+    assert set(missing) == {"python-docx", "openpyxl", "python-pptx"}
+
+
+def test_missing_libraries_for_categories_reports_pypdf_only_for_pdf_category(monkeypatch):
+    monkeypatch.setattr(local_fs_search, "_PYPDF_IMPORT_ERROR", ImportError("no pypdf"))
+    assert missing_libraries_for_categories(["pdf"]) == ["pypdf"]
+
+
+def test_missing_libraries_for_categories_partial_office_availability(monkeypatch):
+    """Only one of the three office libraries missing still reports just
+    that one -- config validation (in local_docs/onedrive's config.py)
+    is what turns this into a hard failure for the whole 'office'
+    category; this function itself just reports facts."""
+    monkeypatch.setattr(local_fs_search, "_DOCX_IMPORT_ERROR", ImportError("no docx"))
+    monkeypatch.setattr(local_fs_search, "_OPENPYXL_IMPORT_ERROR", None)
+    monkeypatch.setattr(local_fs_search, "_PPTX_IMPORT_ERROR", None)
+    assert missing_libraries_for_categories(["office"]) == ["python-docx"]
+
+
+# -- extraction dispatch when a required library truly isn't importable ----------
+
+
+def test_extract_text_returns_none_for_pdf_when_pypdf_unavailable(tmp_path, monkeypatch):
+    """`_extract_text`'s per-format functions must degrade to `None`
+    (skip), never raise, when the corresponding library isn't
+    importable -- this is the defensive fallback path that makes
+    `search()`/`fetch()` never crash even if a config somehow ended up
+    requesting a category whose library went missing after config
+    validation already passed (e.g. an environment change between config
+    load and a later query)."""
+    monkeypatch.setattr(local_fs_search, "_PYPDF_IMPORT_ERROR", ImportError("no pypdf"))
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    fake_pdf = allowed / "doc.pdf"
+    fake_pdf.write_bytes(b"%PDF-1.4 pretend content")
+
+    assert local_fs_search._extract_text(fake_pdf) is None
+
+
+# -- symlink escape guard applies identically to office/PDF-extension targets ----
+
+
+def test_symlink_escape_is_rejected_for_a_pdf_extension_target(tmp_path):
+    """The path-safety check runs before any type-specific extraction is
+    even attempted (see local_fs/search.py's module docstring) -- proven
+    here with a `.pdf`-extension symlink whose *target* is just garbage
+    bytes (parseability is irrelevant; the symlink must never even reach
+    the extraction step in the first place)."""
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside_pdf = outside / "secret.pdf"
+    outside_pdf.parent.mkdir(parents=True)
+    outside_pdf.write_bytes(b"not a real pdf, just a marker for the escape test")
+
+    escape_link = allowed / "escape.pdf"
+    escape_link.symlink_to(outside_pdf)
+
+    # search: never surfaced, even with "pdf" opted in
+    results = search_local_files(
+        "marker", [allowed], source="test", limit=10, file_categories=["pdf"]
+    )
+    assert results == []
+
+    # fetch: refused outright, not silently resolved and (attempted to be) parsed
+    with pytest.raises(ConnectorAPIError):
+        fetch_local_file(str(escape_link), [allowed], source="test", file_categories=["pdf"])

@@ -300,23 +300,68 @@ a clear error.
 }
 ```
 
-`search`/`fetch` only ever read `.md`/`.markdown`/`.txt`/`.rst` files —
-PDF/Word/Excel/image files are explicitly out of scope for V1 (see
-`todo.md`). Every file's real, symlink-resolved path is verified to be
-inside one of the directories above before its content is ever read or
-returned — a symlink pointing outside this list, or a path-traversal-style
-`fetch` id (e.g. `"../../etc/passwd"`), is refused, not silently resolved.
+By default, `search`/`fetch` only read `.md`/`.markdown`/`.txt`/`.rst`
+files (the `"text"` category — see below). Every file's real,
+symlink-resolved path is verified to be inside one of the directories
+above before its content is ever read or returned — a symlink pointing
+outside this list, or a path-traversal-style `fetch` id (e.g.
+`"../../etc/passwd"`), is refused, not silently resolved.
 
-**OneDrive** (`onedrive.json`, `allowed_directories`) — structurally
-identical to Local Docs (same field name, same "no credential" shape); the
-only real difference is what you point it at and one extra behavior. Point
-it at your **already-synced local OneDrive folder(s)** — this connector
-never auto-detects the path (real sync-folder locations vary too much
-across OS/account type to guess reliably) and never calls Microsoft Graph:
+**`file_categories`: opt in to source/config files and real office/PDF
+text.** Add a `file_categories` list to widen what this connector may
+read beyond the `["text"]` default — this is a config-time "permission"
+gate, not automatic:
+
+```json
+{
+  "allowed_directories": ["/Users/alice/notes", "/Users/alice/repo"],
+  "file_categories": ["text", "code", "office", "pdf"],
+  "result_limit": 15
+}
+```
+
+- `"code"` — a broad set of common source/config extensions (`.py`,
+  `.js`, `.ts`, `.java`, `.go`, `.yaml`, `.json`, `.sql`, …), read as
+  plain text, no extra library needed.
+- `"office"` — real embedded text from `.docx`/`.xlsx`/`.pptx` (paragraph
+  + table text; every sheet's cell values; every slide's text frames),
+  via `python-docx`/`openpyxl`/`python-pptx`.
+- `"pdf"` — real embedded text per page, joined, via `pypdf`.
+
+`"office"`/`"pdf"` need the `documents` extra installed
+(`pip install -e ".[local-docs,documents]"`) — requesting either without
+it fails config loading immediately with a clear, actionable error, not a
+silent no-op at query time. **OCR/image-based text recognition is
+explicitly, permanently out of scope** — confirmed directly with the
+project owner ("does this include images via OCR?" → structured
+documents with real embedded text only) — no Tesseract or other OCR
+dependency exists anywhere in this package, in any category. A
+corrupted, malformed, or password-protected office/PDF file is skipped
+gracefully, never crashes a search or the rest of a multi-file walk — see
+`src/mcp_connectors/local_fs/search.py`'s module docstring for exactly
+which real exception types were observed and caught per library.
+**Honesty note on performance**: there's still no indexing (unchanged
+V1 design) — an office/PDF file is re-parsed from scratch on every query
+that walks past it, meaningfully slower than the plain-text read path,
+worth knowing before pointing this at a directory with hundreds of large
+office documents.
+
+An existing `local_docs.json`/`onedrive.json` with no `file_categories`
+key at all is unaffected by any of this — the field defaults to
+`["text"]`, identical to this connector's original behavior.
+
+**OneDrive** (`onedrive.json`, `allowed_directories`, `file_categories`)
+— structurally identical to Local Docs (same field names, same "no
+credential" shape, same `file_categories` mechanism); the only real
+difference is what you point it at and one extra behavior. Point it at
+your **already-synced local OneDrive folder(s)** — this connector never
+auto-detects the path (real sync-folder locations vary too much across
+OS/account type to guess reliably) and never calls Microsoft Graph:
 
 ```json
 {
   "allowed_directories": ["/Users/alice/Library/CloudStorage/OneDrive-Contoso"],
+  "file_categories": ["text", "office", "pdf"],
   "result_limit": 15
 }
 ```
@@ -342,9 +387,10 @@ is and isn't detected (notably: not on macOS's own placeholder-status API,
 which isn't reachable from Python's stdlib).
 
 **Neither Local Docs nor OneDrive has a credential-resolution step at
-startup** — both fail at startup only if their config file is missing or
-names a directory that doesn't exist/isn't a directory; there is nothing
-else to check.
+startup** — both fail at startup only if their config file is missing,
+names a directory that doesn't exist/isn't a directory, or requests an
+`"office"`/`"pdf"` `file_categories` entry whose parsing library isn't
+installed; there is nothing else to check.
 
 ## What's still unverified
 
@@ -372,3 +418,23 @@ was available to produce an actual Files-On-Demand placeholder to test
 against, and the Windows-specific file-attribute check has no Windows
 machine to verify against at all (only unit-tested via a monkeypatched
 `stat()` result).
+
+**`file_categories`/`"office"`/`"pdf"` support (added in a later pass)**:
+re-ran the same real MCP stdio round trip against a live `local-docs-mcp`
+config with `file_categories: ["text", "code", "pdf"]` — a real `.py` file
+and a real generated `.pdf` (built with `pypdf` itself, not a canned
+sample) both came back as genuine `search` hits with real extracted text,
+`isError: False`. All four new formats' extraction (`.docx`/`.xlsx`/
+`.pptx`/`.pdf`) is backed by tests that build a real fixture with the same
+library that reads it and assert the real extracted text comes back
+(`tests/test_local_fs_documents.py`) — not mocked file content. The
+corrupted-file defensive path (garbage bytes with the right extension) is
+tested for all four formats and confirmed to skip cleanly rather than
+crash. What's **not** independently verified: a real password-protected
+`.docx`/`.xlsx`/`.pptx` (only PDF encryption was tested, since `pypdf`
+alone could produce one; the other three libraries' encrypted-file
+handling is exercised only via the general "corrupted file" catch path,
+not a dedicated encrypted-file test), and no real large/complex
+office/PDF document (multi-hundred-page PDF, deeply nested `.xlsx`
+formulas, etc.) was tested for either correctness at scale or the
+documented performance cost of no-indexing live parsing.

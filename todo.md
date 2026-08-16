@@ -954,6 +954,165 @@ the existing three connectors exactly.
       already excludes `packages/mcp-connectors/` from Nova's own pytest
       discovery, by design -- see that file's comment).
 
+### Follow-up in the same branch/pass: configurable `file_categories` -- code, office documents, and PDF, gated by explicit opt-in
+
+The "PDF/`.docx`/`.xlsx`/image file support" gap below was **partially,
+deliberately resolved** in a later commit on this same branch, after a
+direct scope decision from the project owner. Kept as one amended section
+rather than a duplicate, since it's the same two connectors gaining a
+capability, not new connectors.
+
+**Confirmed scope, decided by the project owner via a direct question**:
+code/config files (plain text -- just widens the extension allowlist, no
+new dependency) and structured documents with real embedded text --
+**PDF, `.docx`, `.xlsx`, `.pptx`**. **OCR/images explicitly excluded**:
+asked directly "does this include images via OCR?", answered "structured
+documents only" -- real embedded text extraction, not image/screenshot
+recognition. No Tesseract or any OCR dependency anywhere in this package.
+
+- [x] **`file_categories`: a config field, not an unconditional widening**
+      -- both `LocalDocsConnectorConfig` and `OneDriveConnectorConfig`
+      gained `file_categories: List[Literal["text", "code", "office",
+      "pdf"]]`, defaulting to `["text"]` only. This is the actual
+      "permission" gate the owner asked for: a user must explicitly list
+      `"code"`/`"office"`/`"pdf"` in their JSON config to grant that
+      access. **Backward compatible, not a breaking schema change** --
+      an existing config file with no `file_categories` key at all
+      behaves exactly as before (proven directly, not just by the field
+      default: `tests/test_local_docs.py::
+      test_file_categories_backward_compatible_with_configs_predating_the_field`
+      hand-writes a JSON payload with no `file_categories` key and
+      confirms it loads with the original text-only scope).
+- [x] **`"code"` category**: ~40 common source/config extensions
+      (`.py`/`.js`/`.ts`/`.java`/`.go`/`.rs`/`.rb`/`.php`/`.swift`/
+      `.kt`/`.scala`/`.sh`/`.sql`/`.yaml`/`.json`/`.toml`/`.xml`/`.html`/
+      `.css`/and more -- `local_fs/search.py::CODE_EXTENSIONS`,
+      deliberately non-exhaustive). Reads via the exact same plain-text
+      path as `"text"` -- no new library, no new risk surface.
+- [x] **`"office"`/`"pdf"` categories: real embedded-text extraction**
+      via the standard, well-maintained library for each --
+      `python-docx` (`.docx`: paragraphs + table cells), `openpyxl`
+      (`.xlsx`: every sheet's cell values, `read_only`/`data_only` mode),
+      `python-pptx` (`.pptx`: every slide shape's text frame text),
+      `pypdf` (`.pdf`: per-page text, joined; `reader.is_encrypted` skips
+      password-protected files rather than guessing). New `documents`
+      `pyproject.toml` extra (`python-docx>=1.0`, `openpyxl>=3.1`,
+      `python-pptx>=0.6`, `pypdf>=4.0` -- floors verified by actually
+      installing all four together into this project's own disposable
+      venv alongside every other extra: resolved to python-docx 1.2.0,
+      openpyxl 3.1.5, python-pptx 1.0.2, pypdf 6.16.1, no conflicts).
+      **Deliberately kept separate from the `all` extra** -- unlike the
+      other extras (each "one more MCP server's core dependency"), this
+      one adds four third-party parsing libraries most `local_docs`/
+      `onedrive` installs won't need at all (default `file_categories`
+      needs none of them); a user opts in with e.g.
+      `mcp-connectors[local-docs,documents]`, mirroring the same
+      explicit-opt-in posture `file_categories` has at the config layer.
+      All four libraries are deferred-imported (mirrors `common.py`'s
+      `keyring` pattern) so the package still imports cleanly without
+      `documents` installed -- only a config that actually requests
+      `"office"`/`"pdf"` hits a real, clear error
+      (`missing_libraries_for_categories`, called from each connector's
+      `file_categories` field validator), and only at config-*validation*
+      time, not a silent per-file no-op discovered later.
+- [x] **Defensive per-format extraction, verified against real
+      exceptions, not assumed** -- each `_extract_*_text` function
+      catches broadly (`except Exception`, documented as deliberate,
+      since each library raises a *different* exception type for
+      corrupted/malformed input) and returns `None` (skip this one file)
+      rather than raising or crashing the walk. Confirmed directly by
+      actually feeding each library garbage bytes with the right
+      extension before writing any handling code: `pypdf` raised
+      `pypdf.errors.PdfStreamError`, `python-docx` raised
+      `docx.opc.exceptions.PackageNotFoundError`, `openpyxl` raised
+      `zipfile.BadZipFile`, `python-pptx` raised
+      `pptx.exc.PackageNotFoundError` -- four different exception types
+      across four libraries, confirming a broad catch (not one specific
+      class) is the pragmatic, correct choice here. A dedicated test per
+      format proves a corrupted file is skipped, not crashed
+      (`tests/test_local_fs_documents.py::test_corrupted_{pdf,docx,xlsx,
+      pptx}_*`), plus one proving a corrupted file among several good
+      ones doesn't abort the rest of the walk
+      (`test_corrupted_office_file_does_not_abort_a_multi_file_walk`).
+      Encryption is also covered for PDF specifically (`pypdf` alone can
+      both write and read an encrypted PDF, so a real encrypted fixture
+      was buildable without adding a dependency): a password-protected
+      `.pdf` is confirmed to never surface its content via `search()` and
+      to raise a clear `ConnectorAPIError` on `fetch()`, not empty/
+      garbage content. **Not independently verified**: a real
+      password-protected `.docx`/`.xlsx`/`.pptx` (only PDF encryption was
+      practically buildable without a new dependency; the other three
+      formats' encrypted-file handling only goes through the general
+      corrupted-file catch path, not a dedicated encrypted-file test).
+- [x] **The path-safety guarantee needed no changes, and was re-proven
+      against the new code paths, not just assumed to still hold** --
+      `_real_path_within_allowlist`/`require_within_allowlist` run
+      before any type-specific extraction and have no awareness of file
+      type at all, so office/PDF files inherit the exact same symlink-
+      escape and path-traversal rejection as `.txt` files always had.
+      Proven directly, not just by inspection:
+      `tests/test_local_fs.py::test_symlink_escape_is_rejected_for_a_pdf_extension_target`
+      constructs a real symlink with a `.pdf` extension pointing outside
+      an allowed directory and confirms both `search()` (with `"pdf"`
+      opted in) and `fetch()` reject it -- the *entire* existing
+      symlink-escape/path-traversal test suite from the first pass was
+      also re-run unchanged and still passes.
+- [x] **Real generated fixtures, not mocked content** -- every
+      `.docx`/`.xlsx`/`.pptx`/`.pdf` happy-path test in
+      `tests/test_local_fs_documents.py` builds a real file with the
+      *same* library that reads it (including the `.pdf` fixture, built
+      with raw `pypdf.PdfWriter`/content-stream construction since
+      `pypdf` itself has no high-level text-drawing API -- prototyped and
+      confirmed working via a real `PdfWriter` -> `PdfReader` round trip
+      before writing any test) and asserts the real extracted text comes
+      back through `search_local_files`/`fetch_local_file` -- e.g. a real
+      `.pptx` with a slide titled `"unique-pptx-slide-marker"` is found
+      by searching for that exact string. Skipped as a whole module (not
+      failed) if the `documents` extra isn't installed
+      (`pytest.importorskip` per library at module top) -- confirmed
+      directly: a full suite run in a venv *without* `documents`
+      correctly skips this one module (reported as a single skip,
+      1 module) plus one `documents`-gated test in `test_local_docs.py`,
+      while every other test (including all `file_categories` config/
+      gating logic) still passes normally.
+- [x] **The `file_categories` gate actually withholds access, proven
+      end to end through the real client, not just the shared module** --
+      `tests/test_local_docs.py::
+      test_code_file_invisible_to_search_with_default_file_categories`
+      is the literal scenario used to validate this: a real `.py` file
+      sitting in an allowed directory is invisible to `LocalDocsClient
+      .search()` when `file_categories` is left at its default
+      `["text"]`, and becomes findable once `"code"` is added to the
+      config -- and the reverse for `fetch()` (refused with a clear
+      `ConnectorAPIError` naming the missing category, then succeeds once
+      granted). Mirrored for OneDrive.
+- [x] **Real, live end-to-end re-verification with the new categories,
+      not just unit tests** -- re-ran the same real MCP stdio client
+      pattern from the first pass, this time against a `local-docs-mcp`
+      config with `file_categories: ["text", "code", "pdf"]`: a real
+      `.py` file and a real generated `.pdf` (again, built with `pypdf`
+      itself) both came back as genuine `search` hits with real
+      extracted text and `isError: False` -- not a mocked or assumed
+      result.
+- [x] **Tests**: 50 new tests across `tests/test_local_fs.py` (extension/
+      category resolution, `missing_libraries_for_categories`, the
+      pdf-extension symlink-escape re-proof), the new
+      `tests/test_local_fs_documents.py` (16 tests: happy path +
+      corrupted-file cases for all four formats, plus encryption and
+      multi-file-walk-survival), and `tests/test_local_docs.py`/
+      `tests/test_onedrive.py` (config validation for `file_categories`,
+      including the "library not installed" config-load-time error, and
+      client-level category-gating) -- package's own suite went from
+      **195 passed, 1 skipped to 245 passed, 1 skipped**, zero
+      regressions (confirmed via a fresh venv,
+      `pip install -e ".[all,dev,documents]"`). Also confirmed the suite
+      still passes cleanly *without* `documents` installed (228 passed,
+      3 skipped -- the extra 2 skips are the whole document-fixtures
+      module plus one library-availability-guarded test, exactly the
+      intended graceful degradation, not a failure).
+- [x] **Nova's own top-level suite re-confirmed unaffected again**:
+      **397 passed, 3 skipped**, unchanged from every prior check.
+
 **Explicitly deferred, not started, matching this pass's scope boundary**:
 
 - [ ] **No Sage-style aggregator or `RetrievalCapability`/agent-framework
@@ -961,13 +1120,31 @@ the existing three connectors exactly.
       unstarted Phase 2 gap the original three connectors have (see the
       updated Sage follow-up bullet below). Nothing in this pass touches
       `RetrievalCapability`, the orchestrator, or any specialist agent.
-- [ ] PDF/`.docx`/`.xlsx`/image file support (see above -- a real,
-      deliberately deferred V1 gap, not an oversight).
+- [ ] ~~PDF/`.docx`/`.xlsx`/image file support~~ **Partially resolved**
+      (see the `file_categories` follow-up above): PDF/`.docx`/`.xlsx`/
+      `.pptx` are now supported, opt-in via config. **Image formats
+      remain out of scope, but now as a confirmed deliberate exclusion
+      (OCR explicitly rejected by the project owner), not an open gap
+      awaiting a decision.**
 - [ ] Full OneDrive Files-On-Demand detection on macOS (needs a native
       `pyobjc`-style bridge to Apple's File Provider API -- see above) and
       real-Windows/real-OneDrive-account verification of the attribute
       check and the placeholder detection generally (both currently only
       unit-tested against synthetic stand-ins).
+- [ ] No indexing/caching for office/PDF parsing -- an office/PDF file is
+      re-parsed from scratch on every single query that walks past it (no
+      cache, matching V1's "no indexing pipeline" scope), markedly slower
+      than the plain-text read path. Untested at real scale (no
+      multi-hundred-page PDF or large/complex `.xlsx` was used in
+      testing) -- a real cost flagged honestly in
+      `local_fs/search.py`'s module docstring and `INSTALL.md`, not
+      hidden, and a real candidate for an indexing/caching pass if this
+      connector is ever pointed at a directory with many large office
+      documents.
+- [ ] Real password-protected `.docx`/`.xlsx`/`.pptx` files, not just
+      `.pdf`, were not independently tested (see above) -- covered only
+      by the general corrupted-file catch path, not a dedicated
+      encrypted-file assertion.
 - [ ] No pagination beyond the first page of results for either
       connector, same "single top-N `result_limit` request" design as the
       other three connectors.

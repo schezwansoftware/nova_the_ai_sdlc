@@ -7,7 +7,8 @@ folder directly, rather than calling Microsoft Graph -- see
 deliberate choice, not a shortcut). This module holds the logic genuinely
 shared between the two; each connector's own `client.py` is a thin
 wrapper that supplies its allowlisted directories, its `source` label,
-and whether OneDrive-specific cloud-placeholder detection applies.
+its configured `file_categories`, and whether OneDrive-specific
+cloud-placeholder detection applies.
 
 ## No indexing/sync infrastructure
 
@@ -15,18 +16,73 @@ Live search at query time only: walk the allowlisted directories, read
 matching files, do a plain case-insensitive substring match over
 content. No persistent search index is built or maintained, matching
 this whole package's established "no indexing pipeline in V1"
-philosophy (see `mcp_connectors/__init__.py`).
+philosophy (see `mcp_connectors/__init__.py`). **Honesty note**: this
+means an office/PDF file is re-parsed from scratch on every single query
+that walks past it -- there is no cache. That's markedly slower than the
+plain-text read path (a multi-page PDF or a large `.xlsx` is real parsing
+work, not a `read_text()` call), and gets slower the more office/PDF
+files live in an allowlisted directory. Fine for V1's "no indexing
+pipeline" scope and for the directory sizes this is designed around, but
+a real cost, not a free extension of the existing design -- worth an
+indexing/caching pass if this connector is ever pointed at a directory
+with hundreds of large office documents.
 
-## V1 file-type scope: plain text formats only -- a real, deliberate gap
+## V1 file-type scope: opt-in categories, not a fixed extension list
 
-Only `.md`, `.markdown`, `.txt`, `.rst` files are ever read or returned.
-PDF, Word (`.docx`), Excel (`.xlsx`), and image formats are explicitly
-**out of scope for V1** -- not attempted, not silently ignored: this is
-a real, deliberately deferred gap, tracked in `todo.md`, not an
-oversight. A binary/rich-document file sitting in an allowlisted
-directory is simply never matched by `iter_candidate_files` below (its
-extension isn't in `PLAIN_TEXT_EXTENSIONS`), so it never reaches the
-read/search path at all.
+Every connector's config declares a `file_categories` list (default:
+`["text"]` only) -- the config-time "permission" gate for *what kinds of
+files* this connector may ever read, layered on top of (not a
+replacement for) the directory allowlist described below. Four
+categories exist, defined by `FILE_CATEGORY_EXTENSIONS` below:
+
+  - **`"text"`** (the default, always safe, no library needed): `.md`,
+    `.markdown`, `.txt`, `.rst`.
+  - **`"code"`** (no library needed -- read via the exact same plain-text
+    path as `"text"`): a reasonably broad, deliberately non-exhaustive
+    set of common source/config file extensions -- see `CODE_EXTENSIONS`
+    below for the full list (Python, JS/TS, Java, C/C++/C#, Go, Rust,
+    Ruby, PHP, Swift, Kotlin, Scala, shell, SQL, YAML/JSON/TOML/XML,
+    HTML/CSS, and a handful more).
+  - **`"office"`** (needs the `documents` extra): `.docx`, `.xlsx`,
+    `.pptx` -- parsed via `python-docx`/`openpyxl`/`python-pptx`
+    respectively, extracting real embedded text (paragraphs + table
+    cells for `.docx`; cell values across all sheets for `.xlsx`; text
+    frame text across all slide shapes for `.pptx`).
+  - **`"pdf"`** (needs the `documents` extra): `.pdf` -- parsed via
+    `pypdf`, extracting each page's text and joining them.
+
+  **Explicitly, deliberately out of scope: OCR / image-based text
+  recognition.** This was a direct question put to the project owner --
+  "does this include images via OCR?" -- answered explicitly:
+  structured documents with real embedded text only, not image/screenshot
+  recognition. No Tesseract or other OCR dependency is used or planned
+  here; a scanned/image-only PDF, or an image file of any kind (`.png`/
+  `.jpg`/etc.), is never readable by this connector, in any category,
+  confirmed as a deliberate exclusion rather than a gap.
+
+  A category not listed in a connector's config is a hard `search()`/
+  `fetch()` boundary, identically to the directory allowlist: a `.py`
+  file sitting in an allowlisted directory is invisible to `search()`
+  and refused by `fetch()` with a clear error unless `"code"` is in that
+  connector's configured `file_categories` -- see
+  `local_docs/config.py`/`onedrive/config.py`'s `file_categories` field
+  and `_validate_file_categories`. This is backward compatible on
+  purpose: an existing config file with no `file_categories` key at all
+  gets the pydantic field default (`["text"]`) and behaves exactly as it
+  did before office/PDF/code support existed -- widening scope always
+  requires an explicit config edit, never happens automatically from a
+  package upgrade.
+
+  Requesting `"office"` or `"pdf"` when the corresponding library isn't
+  importable in the current environment is a **config-validation-time**
+  error (`missing_libraries_for_categories`, called from each
+  connector's config model), not a confusing failure discovered later on
+  the first matching file -- see `pyproject.toml`'s `documents` extra.
+  `"office"` requires all three of `python-docx`/`openpyxl`/
+  `python-pptx` to be importable (not just whichever one a particular
+  file happens to need) -- deliberately simple/predictable rather than a
+  category that silently half-works depending on which of the three
+  libraries happens to be installed.
 
 ## The precision requirement, adapted for local files
 
@@ -74,7 +130,35 @@ equivalent guarantee, in two analogous places:
      deserves a loud, explicit refusal rather than a silent empty result.
      See `tests/test_local_fs.py` for the symlink-escape and
      path-traversal tests this guarantee is checked against directly --
-     not just asserted in prose here.
+     not just asserted in prose here. **This check is fully agnostic to
+     file type/category** -- it runs identically, before any
+     format-specific extraction function below is ever called, whether
+     the target is a `.txt` file or a `.pdf`; a symlink escape pointing
+     at a `.pdf` is rejected by the exact same `require_within_allowlist`
+     call as one pointing at a `.txt` file (see
+     `test_symlink_escape_is_rejected_for_office_and_pdf_files`).
+
+## Per-format text extraction: defensive against corrupted/malformed files
+
+`_extract_docx_text`/`_extract_xlsx_text`/`_extract_pptx_text`/
+`_extract_pdf_text` each wrap their underlying library's parse call in a
+broad `except Exception` -- deliberately broad, not a specific exception
+class, because each library raises a *different* exception type for
+malformed/corrupted/wrong-format input (verified directly against the
+installed libraries, not assumed: `pypdf.errors.PdfStreamError` for a
+truncated/garbage PDF, `docx.opc.exceptions.PackageNotFoundError` for a
+non-`.docx`/corrupted file, `zipfile.BadZipFile` for a corrupted
+`.xlsx`, `pptx.exc.PackageNotFoundError` for a corrupted `.pptx` -- and
+that's not an exhaustive list of what a truly adversarial or just
+bit-rotted file could trigger). Any of them means "this one file can't
+be read," not "abort the whole search" -- exactly the same posture
+`_read_text` already has for a plain-text file it can't decode/open
+(`OSError` -> `None`). A password-protected PDF is treated the same way
+(`reader.is_encrypted` -> skip; no password-guessing attempted). None of
+this is speculative -- see `tests/test_local_fs.py`'s
+`test_*_corrupted_file_is_skipped_not_crashed` tests, which feed each
+extractor a real file with the right extension but garbage bytes as
+content and assert `None` comes back, not a raised exception.
 
 ## OneDrive Files-On-Demand: a real, honest gap, not a false "fully handled"
 
@@ -129,13 +213,107 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Iterator, List, Optional, Sequence, Tuple
+from typing import Dict, FrozenSet, Iterator, List, Optional, Sequence, Tuple
 
 from mcp_connectors.common import ConnectorAPIError, Document
 
-#: V1 file-type scope -- see module docstring. Matched case-insensitively
-#: against a candidate file's suffix.
+# -- deferred imports for the office/pdf parsing libraries ---------------------
+#
+# Mirrors `mcp_connectors/common.py`'s `keyring` deferred-ImportError
+# pattern: this module must import cleanly even when the `documents`
+# extra isn't installed (e.g. a `local_docs`/`onedrive` install that only
+# ever wants `"text"`/`"code"` categories, which need no third-party
+# library at all). Each library's ImportError, if any, is captured once
+# at module-import time and only ever turned into a real, user-facing
+# error at config-validation time (`missing_libraries_for_categories`,
+# called from each connector's `file_categories` field validator) or
+# defensively inside the corresponding `_extract_*_text` function.
+
+try:
+    import docx as _docx  # python-docx
+
+    _DOCX_IMPORT_ERROR: Optional[BaseException] = None
+except ImportError as exc:  # pragma: no cover - exercised only without `documents`
+    _docx = None
+    _DOCX_IMPORT_ERROR = exc
+
+try:
+    import openpyxl as _openpyxl
+
+    _OPENPYXL_IMPORT_ERROR: Optional[BaseException] = None
+except ImportError as exc:  # pragma: no cover - exercised only without `documents`
+    _openpyxl = None
+    _OPENPYXL_IMPORT_ERROR = exc
+
+try:
+    import pptx as _pptx  # python-pptx
+
+    _PPTX_IMPORT_ERROR: Optional[BaseException] = None
+except ImportError as exc:  # pragma: no cover - exercised only without `documents`
+    _pptx = None
+    _PPTX_IMPORT_ERROR = exc
+
+try:
+    import pypdf as _pypdf
+
+    _PYPDF_IMPORT_ERROR: Optional[BaseException] = None
+except ImportError as exc:  # pragma: no cover - exercised only without `documents`
+    _pypdf = None
+    _PYPDF_IMPORT_ERROR = exc
+
+
+# -- file-type scope: categories, extensions -------------------------------------
+
+#: `"text"` category -- see module docstring. Matched case-insensitively
+#: against a candidate file's suffix. Kept under its original name for
+#: backward compatibility (this constant existed before `file_categories`
+#: did, and is still exactly the default-category extension set).
 PLAIN_TEXT_EXTENSIONS = frozenset({".md", ".markdown", ".txt", ".rst"})
+TEXT_EXTENSIONS = PLAIN_TEXT_EXTENSIONS
+
+#: `"code"` category -- see module docstring. A deliberately non-exhaustive
+#: but reasonably broad set of common source/config file extensions,
+#: read via the exact same plain-text path as `TEXT_EXTENSIONS` (no
+#: library needed for this category).
+CODE_EXTENSIONS = frozenset(
+    {
+        ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".c", ".h", ".cc", ".cpp", ".hpp",
+        ".cs", ".go", ".rs", ".rb", ".php", ".swift", ".kt", ".kts", ".scala",
+        ".sh", ".bash", ".zsh", ".sql",
+        ".yaml", ".yml", ".json", ".toml", ".xml", ".ini", ".cfg", ".conf",
+        ".html", ".htm", ".css", ".scss", ".less",
+        ".lua", ".pl", ".pm", ".r", ".dart", ".ex", ".exs", ".clj", ".cljs", ".hs",
+    }
+)
+
+#: `"office"` category -- see module docstring. Each extension maps to
+#: exactly one parsing library (`.docx` -> `python-docx`, `.xlsx` ->
+#: `openpyxl`, `.pptx` -> `python-pptx`), all three required to be
+#: importable for the category as a whole -- see
+#: `missing_libraries_for_categories`.
+OFFICE_EXTENSIONS = frozenset({".docx", ".xlsx", ".pptx"})
+
+#: `"pdf"` category -- see module docstring.
+PDF_EXTENSIONS = frozenset({".pdf"})
+
+#: The four known `file_categories` values -- also the `Literal` choices
+#: on each connector's config model (`local_docs/config.py`,
+#: `onedrive/config.py`), imported from here so both stay in sync with
+#: this module rather than redeclaring the list.
+FileCategory = str  # `Literal["text", "code", "office", "pdf"]` at the config layer
+KNOWN_FILE_CATEGORIES: Tuple[str, ...] = ("text", "code", "office", "pdf")
+
+#: The config-model field default -- unchanged, existing-file-scope
+#: behavior for any config that predates `file_categories` entirely (see
+#: module docstring's backward-compatibility note).
+DEFAULT_FILE_CATEGORIES: Tuple[str, ...] = ("text",)
+
+FILE_CATEGORY_EXTENSIONS: Dict[str, FrozenSet[str]] = {
+    "text": TEXT_EXTENSIONS,
+    "code": CODE_EXTENSIONS,
+    "office": OFFICE_EXTENSIONS,
+    "pdf": PDF_EXTENSIONS,
+}
 
 #: Win32 `FILE_ATTRIBUTE_*` bits, only ever present on `os.stat_result
 #: .st_file_attributes` on Windows -- see module docstring's OneDrive
@@ -145,6 +323,46 @@ PLAIN_TEXT_EXTENSIONS = frozenset({".md", ".markdown", ".txt", ".rst"})
 #: platforms' `stat` results, handled via `getattr(..., None)` below.
 _FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x00400000
 _FILE_ATTRIBUTE_OFFLINE = 0x00001000
+
+
+def extensions_for_categories(categories: Sequence[str]) -> FrozenSet[str]:
+    """The file-extension allowlist a given `file_categories` config
+    resolves to -- e.g. `["text", "code"]` -> the union of
+    `TEXT_EXTENSIONS` and `CODE_EXTENSIONS`. An unknown category name is
+    silently ignored here (pydantic's `Literal` field type is what
+    actually rejects an unknown category value at config-validation
+    time -- this function is also called from test code with plain
+    strings, so it stays permissive rather than raising)."""
+    result: set = set()
+    for category in categories:
+        result |= FILE_CATEGORY_EXTENSIONS.get(category, frozenset())
+    return frozenset(result)
+
+
+def missing_libraries_for_categories(categories: Sequence[str]) -> List[str]:
+    """Returns the human-readable `pip`-package names of any parsing
+    library required by `categories` that isn't actually importable in
+    this environment right now -- e.g. `["office"]` on an environment
+    without the `documents` extra installed returns
+    `["python-docx", "openpyxl", "python-pptx"]`. Empty list means every
+    requested category's dependencies (if any) are satisfied (`"text"`/
+    `"code"` never contribute anything here -- they need nothing beyond
+    stdlib `pathlib`). Called from each connector's `file_categories`
+    config-field validator, so a config requesting `"office"`/`"pdf"`
+    support fails fast and clearly at config-load time rather than
+    silently skipping every matching file at query time."""
+    missing: List[str] = []
+    if "office" in categories:
+        if _DOCX_IMPORT_ERROR is not None:
+            missing.append("python-docx")
+        if _OPENPYXL_IMPORT_ERROR is not None:
+            missing.append("openpyxl")
+        if _PPTX_IMPORT_ERROR is not None:
+            missing.append("python-pptx")
+    if "pdf" in categories:
+        if _PYPDF_IMPORT_ERROR is not None:
+            missing.append("pypdf")
+    return missing
 
 
 def _real_path_within_allowlist(path: Path, allowed_dirs: Sequence[Path]) -> Optional[Tuple[Path, Path]]:
@@ -158,7 +376,10 @@ def _real_path_within_allowlist(path: Path, allowed_dirs: Sequence[Path]) -> Opt
     resolves -- directly or via a symlink -- outside every allowed dir).
     Never raises; callers decide whether a `None` result means "skip
     silently" (`search`'s directory walk) or "refuse loudly"
-    (`require_within_allowlist`, used by `fetch()`)."""
+    (`require_within_allowlist`, used by `fetch()`). This check has no
+    awareness of file type/category whatsoever -- it runs identically
+    regardless of what's ultimately going to try to read the file
+    afterward."""
     try:
         real = path.resolve(strict=True)
     except OSError:
@@ -213,14 +434,20 @@ def looks_like_cloud_only_placeholder(real_path: Path) -> bool:
     return st.st_size == 0
 
 
-def iter_candidate_files(allowed_dirs: Sequence[Path]) -> Iterator[Tuple[Path, Path]]:
+def iter_candidate_files(
+    allowed_dirs: Sequence[Path], allowed_extensions: FrozenSet[str] = PLAIN_TEXT_EXTENSIONS
+) -> Iterator[Tuple[Path, Path]]:
     """Walk every allowlisted directory, yielding `(real_path,
-    containing_allowed_dir)` for every plain-text-extension regular file
-    found -- symlink-escape-guarded (see module docstring): a symlink
-    resolving outside every allowed directory is silently dropped, not
-    yielded. Directories that vanish or become unreadable between
-    config-load time and a query (e.g. an unmounted removable drive) are
-    skipped, not a hard failure of the whole search -- a `search()` call
+    containing_allowed_dir)` for every regular file whose extension is
+    in `allowed_extensions` (defaults to the `"text"` category's
+    extensions, for backward compatibility with callers that predate
+    `file_categories` -- in practice every real caller now passes
+    `extensions_for_categories(config.file_categories)` explicitly) --
+    symlink-escape-guarded (see module docstring): a symlink resolving
+    outside every allowed directory is silently dropped, not yielded.
+    Directories that vanish or become unreadable between config-load
+    time and a query (e.g. an unmounted removable drive) are skipped,
+    not a hard failure of the whole search -- a `search()` call
     intentionally degrades gracefully to "found nothing there" rather
     than aborting the entire multi-directory search over one bad entry.
     Sorted for deterministic ordering (tests, and stable "first N
@@ -238,7 +465,7 @@ def iter_candidate_files(allowed_dirs: Sequence[Path]) -> Iterator[Tuple[Path, P
                     continue
             except OSError:
                 continue
-            if candidate.suffix.lower() not in PLAIN_TEXT_EXTENSIONS:
+            if candidate.suffix.lower() not in allowed_extensions:
                 continue
             resolved = _real_path_within_allowlist(candidate, allowed_dirs)
             if resolved is None:
@@ -251,6 +478,138 @@ def _read_text(real_path: Path) -> Optional[str]:
         return real_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
+
+
+def _extract_pdf_text(real_path: Path) -> Optional[str]:
+    """Extracts page text from a `.pdf` via `pypdf`. Returns `None`
+    (never raises) for: the `documents` extra not being installed, an
+    encrypted/password-protected PDF (no password-guessing attempted --
+    this connector has no credential of any kind, on principle), or a
+    corrupted/malformed/wrong-format file -- see module docstring's
+    "Per-format text extraction" section for exactly which real
+    exception types were observed and why this catches broadly rather
+    than one specific class."""
+    if _PYPDF_IMPORT_ERROR is not None:
+        return None
+    try:
+        reader = _pypdf.PdfReader(str(real_path))
+        if getattr(reader, "is_encrypted", False):
+            return None
+        parts: List[str] = []
+        for page in reader.pages:
+            text = page.extract_text() or ""
+            if text:
+                parts.append(text)
+        return "\n".join(parts)
+    except Exception:  # noqa: BLE001 - pypdf raises several different exception
+        # types for malformed/truncated/non-PDF bytes (observed directly:
+        # PdfStreamError, PdfReadError, plus lower-level struct/zlib errors
+        # depending on exactly what's corrupted) -- any of them means "can't
+        # read this one file," not "abort the whole search." See module
+        # docstring.
+        return None
+
+
+def _extract_docx_text(real_path: Path) -> Optional[str]:
+    """Extracts paragraph and table-cell text from a `.docx` via
+    `python-docx`. See `_extract_pdf_text`'s docstring for the general
+    "returns `None`, never raises" contract this and the other
+    `_extract_*_text` functions all share."""
+    if _DOCX_IMPORT_ERROR is not None:
+        return None
+    try:
+        document = _docx.Document(str(real_path))
+        parts: List[str] = [paragraph.text for paragraph in document.paragraphs if paragraph.text]
+        for table in document.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    if cell.text:
+                        parts.append(cell.text)
+        return "\n".join(parts)
+    except Exception:  # noqa: BLE001 - python-docx raises
+        # docx.opc.exceptions.PackageNotFoundError for a corrupted/non-.docx
+        # file (observed directly), among other exceptions a malformed zip/XML
+        # payload could trigger. See module docstring.
+        return None
+
+
+def _extract_xlsx_text(real_path: Path) -> Optional[str]:
+    """Extracts every non-empty cell value across every worksheet of a
+    `.xlsx` via `openpyxl`, in `read_only`/`data_only` mode (reads
+    computed values, not formula source text). See `_extract_pdf_text`'s
+    docstring for the shared "returns `None`, never raises" contract."""
+    if _OPENPYXL_IMPORT_ERROR is not None:
+        return None
+    workbook = None
+    try:
+        workbook = _openpyxl.load_workbook(str(real_path), read_only=True, data_only=True)
+        parts: List[str] = []
+        for sheet in workbook.worksheets:
+            for row in sheet.iter_rows(values_only=True):
+                for value in row:
+                    if value is not None and str(value).strip():
+                        parts.append(str(value))
+        return "\n".join(parts)
+    except Exception:  # noqa: BLE001 - openpyxl raises zipfile.BadZipFile for a
+        # corrupted file and openpyxl.utils.exceptions.InvalidFileException for
+        # a wrong-format one (both observed directly), among others. See
+        # module docstring.
+        return None
+    finally:
+        if workbook is not None:
+            try:
+                workbook.close()
+            except Exception:  # noqa: BLE001 - closing a partially-loaded/
+                # already-broken workbook must never itself raise past this
+                # defensive extraction function.
+                pass
+
+
+def _extract_pptx_text(real_path: Path) -> Optional[str]:
+    """Extracts text-frame text across every shape of every slide of a
+    `.pptx` via `python-pptx`. See `_extract_pdf_text`'s docstring for
+    the shared "returns `None`, never raises" contract."""
+    if _PPTX_IMPORT_ERROR is not None:
+        return None
+    try:
+        presentation = _pptx.Presentation(str(real_path))
+        parts: List[str] = []
+        for slide in presentation.slides:
+            for shape in slide.shapes:
+                if not getattr(shape, "has_text_frame", False):
+                    continue
+                for paragraph in shape.text_frame.paragraphs:
+                    text = "".join(run.text for run in paragraph.runs)
+                    if text:
+                        parts.append(text)
+        return "\n".join(parts)
+    except Exception:  # noqa: BLE001 - python-pptx raises
+        # pptx.exc.PackageNotFoundError for a corrupted/non-.pptx file
+        # (observed directly), among others. See module docstring.
+        return None
+
+
+def _extract_text(real_path: Path) -> Optional[str]:
+    """Dispatches to the right extraction path by extension -- plain
+    `_read_text` for `"text"`/`"code"`-category files, the matching
+    `_extract_*_text` function for an office/PDF file. Only ever called
+    on an already-`require_within_allowlist`/`_real_path_within_allowlist`
+    -verified real path (see module docstring's "precision requirement"
+    section) -- this function itself does no path-safety checking, by
+    design, since that check is fully type-agnostic and already done by
+    the time any caller reaches here."""
+    suffix = real_path.suffix.lower()
+    if suffix in TEXT_EXTENSIONS or suffix in CODE_EXTENSIONS:
+        return _read_text(real_path)
+    if suffix == ".pdf":
+        return _extract_pdf_text(real_path)
+    if suffix == ".docx":
+        return _extract_docx_text(real_path)
+    if suffix == ".xlsx":
+        return _extract_xlsx_text(real_path)
+    if suffix == ".pptx":
+        return _extract_pptx_text(real_path)
+    return None  # pragma: no cover - unreachable given upstream extension filtering
 
 
 def _to_document(*, real_path: Path, container: Path, text: str, source: str, query: Optional[str]) -> Document:
@@ -303,29 +662,40 @@ def search_local_files(
     source: str,
     limit: int,
     detect_cloud_placeholders: bool = False,
+    file_categories: Sequence[str] = DEFAULT_FILE_CATEGORIES,
 ) -> List[Document]:
     """Live, no-index text search over `allowed_dirs` (already
     config-time-resolved and, if this is a narrowed request, already
     `enforce_allowlist`-validated by the caller -- this function itself
     trusts `allowed_dirs` as the scope to search, exactly like
     `JiraClient.search()` trusts the JQL it's handed). Case-insensitive
-    plain substring match over each candidate file's content. Capped at
-    `limit` results, stopping the walk early once reached (never an
-    unbounded scan-everything-then-cap)."""
+    plain substring match over each candidate file's extracted content
+    (plain read for `"text"`/`"code"`, real parsing for `"office"`/
+    `"pdf"` -- see `_extract_text`). Capped at `limit` results, stopping
+    the walk early once reached (never an unbounded scan-everything-
+    then-cap). `file_categories` defaults to `("text",)` -- the same
+    default as each connector's config model -- for any caller that
+    predates `file_categories` existing at all."""
     query_norm = (query or "").strip()
     if not query_norm:
         raise ConnectorAPIError("query text must not be empty")
 
+    allowed_extensions = extensions_for_categories(file_categories)
     needle = query_norm.lower()
     results: List[Document] = []
-    for real_path, container in iter_candidate_files(allowed_dirs):
+    for real_path, container in iter_candidate_files(allowed_dirs, allowed_extensions):
         if detect_cloud_placeholders and looks_like_cloud_only_placeholder(real_path):
             # A cloud-only placeholder has no real local content to
             # search -- skip it gracefully rather than matching on
             # nothing or raising mid-walk. See module docstring.
             continue
-        text = _read_text(real_path)
+        text = _extract_text(real_path)
         if text is None:
+            # Either a plain-text file this process can't read, or an
+            # office/PDF file that failed to parse (corrupted, encrypted,
+            # or the `documents` extra isn't installed) -- either way,
+            # skip this one file, don't abort the walk. See module
+            # docstring's "Per-format text extraction" section.
             continue
         if needle not in text.lower():
             continue
@@ -341,12 +711,16 @@ def fetch_local_file(
     *,
     source: str,
     detect_cloud_placeholders: bool = False,
+    file_categories: Sequence[str] = DEFAULT_FILE_CATEGORIES,
 ) -> Document:
     """Fetch one file by id (an absolute path string, normally a
     previous `search_local_files` result's `Document.id`). Path-safety
     is enforced via `require_within_allowlist` -- see module docstring --
     which is what makes a path-traversal or symlink-escape id a hard,
-    explicit `ConnectorAPIError` rather than a silently-resolved read."""
+    explicit `ConnectorAPIError` rather than a silently-resolved read,
+    *before* any type/category check or extraction is even attempted.
+    `file_categories` defaults to `("text",)`, matching
+    `search_local_files`."""
     raw = (file_id or "").strip()
     if not raw:
         raise ConnectorAPIError("file id must not be empty")
@@ -355,12 +729,17 @@ def fetch_local_file(
 
     if not real_path.is_file():
         raise ConnectorAPIError(f"{file_id!r} does not resolve to a regular file")
-    if real_path.suffix.lower() not in PLAIN_TEXT_EXTENSIONS:
+
+    allowed_extensions = extensions_for_categories(file_categories)
+    if real_path.suffix.lower() not in allowed_extensions:
         raise ConnectorAPIError(
             f"{file_id!r} has extension {real_path.suffix!r}, which is outside this "
-            f"connector's V1 plain-text scope ({sorted(PLAIN_TEXT_EXTENSIONS)!r}). "
-            "PDF/Word/Excel/image formats are a real, deliberately deferred gap -- "
-            "see todo.md -- not attempted here."
+            f"connector's currently-enabled file_categories ({list(file_categories)!r}, "
+            f"resolving to extensions {sorted(allowed_extensions)!r}). Add the right "
+            "category ('code'/'office'/'pdf') to this connector's config to grant "
+            "access -- see local_fs/search.py's module docstring for what each "
+            "category covers. OCR/image-based text extraction is out of scope "
+            "regardless of configured categories -- a deliberate exclusion, not a gap."
         )
     if detect_cloud_placeholders and looks_like_cloud_only_placeholder(real_path):
         raise ConnectorAPIError(
@@ -372,7 +751,12 @@ def fetch_local_file(
             "module docstring for exactly what is and isn't checked."
         )
 
-    text = _read_text(real_path)
+    text = _extract_text(real_path)
     if text is None:
-        raise ConnectorAPIError(f"failed to read {file_id!r} ({real_path})")
+        raise ConnectorAPIError(
+            f"failed to read/parse {file_id!r} ({real_path}) -- the file may be "
+            "corrupted, password-protected/encrypted, in an unexpected format for "
+            "its extension, or (for 'office'/'pdf' categories) the `documents` "
+            "extra may not be installed in this environment."
+        )
     return _to_document(real_path=real_path, container=container, text=text, source=source, query=None)

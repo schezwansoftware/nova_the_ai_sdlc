@@ -13,6 +13,7 @@ import pytest
 from pydantic import ValidationError
 
 from mcp_connectors.common import ConnectorAPIError, ConnectorConfigError
+from mcp_connectors.local_fs import search as local_fs_search
 from mcp_connectors.onedrive.client import OneDriveClient
 from mcp_connectors.onedrive.config import (
     OneDriveConnectorConfig,
@@ -82,11 +83,75 @@ def test_load_config_raises_clear_error_when_missing(monkeypatch, tmp_path):
     assert "onedrive.json" in str(excinfo.value) or str(tmp_path) in str(excinfo.value)
 
 
+# -- file_categories: the config-time "permission" gate --------------------------
+# (identical mechanism to local_docs -- see tests/test_local_docs.py for the
+# fuller commentary; duplicated here since each connector's config model is
+# its own self-contained module, per this package's established convention)
+
+
+def test_file_categories_defaults_to_text_only(tmp_path):
+    allowed = tmp_path / "OneDrive"
+    allowed.mkdir()
+    config = OneDriveConnectorConfig(allowed_directories=[str(allowed)])
+    assert config.file_categories == ["text"]
+
+
+def test_file_categories_backward_compatible_with_configs_predating_the_field(tmp_path):
+    allowed = tmp_path / "OneDrive"
+    allowed.mkdir()
+    payload = f'{{"allowed_directories": ["{allowed}"]}}'
+    config = OneDriveConnectorConfig.model_validate_json(payload)
+    assert config.file_categories == ["text"]
+
+
+def test_file_categories_rejects_unknown_category(tmp_path):
+    allowed = tmp_path / "OneDrive"
+    allowed.mkdir()
+    with pytest.raises(ValidationError):
+        OneDriveConnectorConfig(allowed_directories=[str(allowed)], file_categories=["not-a-real-category"])
+
+
+def test_file_categories_office_without_documents_extra_raises_clear_config_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(local_fs_search, "_DOCX_IMPORT_ERROR", ImportError("no docx"))
+    monkeypatch.setattr(local_fs_search, "_OPENPYXL_IMPORT_ERROR", ImportError("no openpyxl"))
+    monkeypatch.setattr(local_fs_search, "_PPTX_IMPORT_ERROR", ImportError("no pptx"))
+    allowed = tmp_path / "OneDrive"
+    allowed.mkdir()
+    with pytest.raises(ValidationError) as excinfo:
+        OneDriveConnectorConfig(allowed_directories=[str(allowed)], file_categories=["office"])
+    assert "documents" in str(excinfo.value)
+
+
+def test_file_categories_pdf_without_documents_extra_raises_clear_config_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(local_fs_search, "_PYPDF_IMPORT_ERROR", ImportError("no pypdf"))
+    allowed = tmp_path / "OneDrive"
+    allowed.mkdir()
+    with pytest.raises(ValidationError) as excinfo:
+        OneDriveConnectorConfig(allowed_directories=[str(allowed)], file_categories=["pdf"])
+    assert "pypdf" in str(excinfo.value)
+
+
+def test_config_round_trip_persists_file_categories(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config-home"
+    monkeypatch.setenv("MCP_CONNECTORS_CONFIG_DIR", str(config_dir))
+    allowed = tmp_path / "OneDrive-Contoso"
+    allowed.mkdir()
+
+    config = OneDriveConnectorConfig(allowed_directories=[str(allowed)], file_categories=["text", "code"])
+    save_config(config)
+
+    loaded = load_config()
+    assert loaded.file_categories == ["text", "code"]
+
+
 # -- OneDriveClient -----------------------------------------------------------------
 
 
-def _config(tmp_path, *dirs, result_limit=10):
-    return OneDriveConnectorConfig(allowed_directories=[str(d) for d in dirs], result_limit=result_limit)
+def _config(tmp_path, *dirs, result_limit=10, file_categories=None):
+    kwargs = {}
+    if file_categories is not None:
+        kwargs["file_categories"] = file_categories
+    return OneDriveConnectorConfig(allowed_directories=[str(d) for d in dirs], result_limit=result_limit, **kwargs)
 
 
 def test_search_and_fetch_happy_path(tmp_path):
@@ -167,3 +232,25 @@ def test_fetch_cloud_only_placeholder_raises_clear_error_not_empty_content(tmp_p
     with pytest.raises(ConnectorAPIError) as excinfo:
         client.fetch(str(placeholder))
     assert "placeholder" in str(excinfo.value).lower()
+
+
+# -- file_categories gating, exercised through the real client -------------------
+
+
+def test_code_file_invisible_to_search_with_default_file_categories(tmp_path):
+    allowed = tmp_path / "OneDrive-Contoso"
+    allowed.mkdir()
+    (allowed / "config.yaml").write_text("unique_onedrive_code_marker: true", encoding="utf-8")
+
+    client = OneDriveClient(_config(tmp_path, allowed))  # default file_categories
+    assert client.search("unique_onedrive_code_marker") == []
+
+
+def test_code_file_found_once_code_category_opted_into_via_config(tmp_path):
+    allowed = tmp_path / "OneDrive-Contoso"
+    allowed.mkdir()
+    (allowed / "config.yaml").write_text("unique_onedrive_code_marker: true", encoding="utf-8")
+
+    client = OneDriveClient(_config(tmp_path, allowed, file_categories=["text", "code"]))
+    results = client.search("unique_onedrive_code_marker")
+    assert [doc.title for doc in results] == ["config.yaml"]
