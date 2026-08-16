@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mcp-connectors"
 version = "0.1.0"
-description = "Standalone MCP servers for Jira, Confluence, and SharePoint -- precise, project/space/site-scoped search and fetch, usable with any MCP-compatible client."
+description = "Standalone MCP servers for Jira, Confluence, SharePoint, local directories, and OneDrive -- precise, scoped search and fetch, usable with any MCP-compatible client."
 requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.0",
@@ -25,6 +25,34 @@ sharepoint = [
     "requests>=2.31",
     "requests-ntlm>=1.2",
 ]
+# local_docs/onedrive are pure local-filesystem connectors -- no
+# credential, no keyring, no HTTP client, no network call at all (see
+# mcp_connectors/local_fs/search.py's module docstring). `mcp` (for
+# FastMCP) is the only real dependency beyond stdlib `pathlib`/`os` for
+# the default `"text"`/`"code"` file_categories. Add `documents` below
+# too if you want `"office"`/`"pdf"` category support.
+local-docs = ["mcp>=1.2.0,<2.0.0"]
+onedrive = ["mcp>=1.2.0,<2.0.0"]
+# Office/PDF real-embedded-text extraction for local_docs/onedrive's
+# opt-in "office"/"pdf" file_categories (see local_fs/search.py's module
+# docstring) -- deliberately NOT folded into `all` below: unlike the
+# other extras (which are all "one more MCP server's core dependency"),
+# this one adds four extra third-party parsing libraries that most
+# installs of local_docs/onedrive won't need at all (the default
+# file_categories is `["text"]`, which needs none of them), so it stays
+# its own explicit opt-in extra, mirroring the same "explicit permission
+# to widen scope" posture `file_categories` itself has at the config
+# layer. A user who wants office/PDF support installs e.g.
+# `mcp-connectors[local-docs,documents]`. Version floors verified by
+# actually installing all four into this project's own disposable venv
+# together with every other extra (no conflicts): python-docx resolved
+# to 1.2.0, openpyxl to 3.1.5, python-pptx to 1.0.2, pypdf to 6.16.1.
+documents = [
+    "python-docx>=1.0",
+    "openpyxl>=3.1",
+    "python-pptx>=0.6",
+    "pypdf>=4.0",
+]
 all = [
     "mcp>=1.2.0,<2.0.0",
     "keyring>=24.0",
@@ -38,6 +66,8 @@ dev = ["pytest>=7.0"]
 jira-mcp = "mcp_connectors.jira.mcp_server:main"
 confluence-mcp = "mcp_connectors.confluence.mcp_server:main"
 sharepoint-mcp = "mcp_connectors.sharepoint.mcp_server:main"
+local-docs-mcp = "mcp_connectors.local_docs.mcp_server:main"
+onedrive-mcp = "mcp_connectors.onedrive.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
